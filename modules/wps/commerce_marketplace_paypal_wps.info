@@ -1,0 +1,8 @@
+name = PayPal WPS
+description = Adapts PayPal Website Payments Standard features for Commerce Marketplace.
+package = Commerce Marketplace (contrib)
+dependencies[] = commerce_marketplace_order
+dependencies[] = commerce_marketplace_payment
+dependencies[] = commerce_marketplace_paypal
+dependencies[] = commerce_paypal_wps
+core = 7.x

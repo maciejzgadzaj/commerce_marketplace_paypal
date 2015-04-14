@@ -1,0 +1,146 @@
+<?php
+/**
+ * @file
+ * Adapts PayPal Website Payments Standard features for Commerce Marketplace.
+ */
+
+/**
+ * Payment method callback: process an IPN once it's been validated.
+ *
+ * Overrides commerce_paypal_wps_paypal_ipn_process()
+ *
+ * @see commerce_paypal_wps_paypal_ipn_process()
+ */
+function commerce_marketplace_paypal_wps_paypal_ipn_process($order, $payment_method, &$ipn) {
+  // Do not perform any processing on WPS transactions here that do not have
+  // transaction IDs, indicating they are non-payment IPNs such as those used
+  // for subscription signup requests.
+  if (empty($ipn['txn_id'])) {
+    return FALSE;
+  }
+
+  // Exit when we don't get a payment status we recognize.
+  if (!in_array($ipn['payment_status'], array('Failed', 'Voided', 'Pending', 'Completed', 'Refunded'))) {
+    commerce_payment_redirect_pane_previous_page($order);
+    return FALSE;
+  }
+
+  // If this is a prior authorization capture IPN for which we've already
+  // created a transaction...
+  if (
+    in_array($ipn['payment_status'], array('Voided', 'Completed'))
+    && !empty($ipn['auth_id'])
+    && $auth_ipn = commerce_paypal_ipn_load($ipn['auth_id'])
+  ) {
+    // Load the prior IPN's transaction and update that with the capture values.
+    // Marketplace-specific: we might have multiple payment transactions for
+    // one IPN, so to load the correct transaction we first need to get its ID
+    // from commerce_maketplace_paypal_ipn_transaction table based on order ID.
+    $conditions = array(
+      'ipn_id' => $auth_ipn['ipn_id'],
+      'order_id' => $order->order_id,
+    );
+    $relationship = commerce_marketplace_paypal_ipn_transaction_load($conditions);
+    $transaction = commerce_payment_transaction_load($relationship['transaction_id']);
+  }
+  else {
+    // Create a new payment transaction for the order.
+    $transaction = commerce_payment_transaction_new('paypal_wps', $order->order_id);
+    $transaction->instance_id = $payment_method['instance_id'];
+  }
+
+  $transaction->remote_id = $ipn['txn_id'];
+  $transaction->amount = commerce_currency_decimal_to_amount($ipn['mc_gross'], $ipn['mc_currency']);
+  $transaction->currency_code = $ipn['mc_currency'];
+  $transaction->payload[REQUEST_TIME . '-ipn'] = $ipn;
+
+  // Marketplace-specific: if we are processing multiple orders from one order
+  // group, the amount returned by an IPN will be equal to sum of total amount
+  // of all those orders. But the local payment transaction amounts should match
+  // each order total, so it needs to be updated here.
+  $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+  if ($transaction->amount > $order_wrapper->commerce_order_total->amount->value()) {
+    $transaction->amount = $order_wrapper->commerce_order_total->amount->value();
+  }
+
+  // Set the transaction's statuses based on the IPN's payment_status.
+  $transaction->remote_status = $ipn['payment_status'];
+
+  // If we didn't get an approval response code...
+  switch ($ipn['payment_status']) {
+    case 'Failed':
+      $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
+      $transaction->message = t("The payment has failed. This happens only if the payment was made from your customer’s bank account.");
+      break;
+
+    case 'Voided':
+      $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
+      $transaction->message = t('The authorization was voided.');
+      break;
+
+    case 'Pending':
+      $transaction->status = COMMERCE_PAYMENT_STATUS_PENDING;
+      $transaction->message = commerce_paypal_ipn_pending_reason($ipn['pending_reason']);
+      break;
+
+    case 'Completed':
+      $transaction->status = COMMERCE_PAYMENT_STATUS_SUCCESS;
+      $transaction->message = t('The payment has completed.');
+      break;
+
+    case 'Refunded':
+      $transaction->status = COMMERCE_PAYMENT_STATUS_SUCCESS;
+      $transaction->message = t('Refund for transaction @txn_id', array('@txn_id' => $ipn['parent_txn_id']));
+      break;
+  }
+
+  // Save the transaction information.
+  commerce_payment_transaction_save($transaction);
+  $ipn['transaction_id'] = $transaction->transaction_id;
+
+  // Marketplace-specific: we also need a connection between *all* created
+  // payment transactions and the IPN, which cannot be saved in the main
+  // commerce_paypal_ipn table, where 'transaction_id' column is defined as int
+  // (see commerce_paypal_schema()) - therefore we need to save it
+  // in a different table, allowing for one-to-many relationships between
+  // IPN ID and transaction ID.
+  // See commerce_marketplace_paypal_ipn_transaction_save().
+  $ipn['transaction_ids'][$order->order_id] = $transaction->transaction_id;
+
+  // Create a billing profile based on the IPN if enabled.
+  if (!empty($payment_method['settings']['ipn_create_billing_profile']) && isset($order->commerce_customer_billing)) {
+
+    // If this order does not have a billing profile yet...
+    if ($order_wrapper->commerce_customer_billing->value() === NULL) {
+      // Ensure we have the required data in the IPN.
+      if (empty($ipn['residence_country']) || empty($ipn['first_name']) || empty($ipn['last_name'])) {
+        $data = array_intersect_key($ipn, drupal_map_assoc(array('residence_country', 'first_name', 'last_name')));
+        watchdog('commerce_marketplace_paypal_wps', 'A billing profile for Order @order_number could not be created due to insufficient data in the IPN:!data', array('@order_number' => $order->order_number, '!data' => '<pre>'. check_plain(print_r($data, TRUE)) .'</pre>'), WATCHDOG_WARNING);
+      }
+      else {
+        // Create the new profile now.
+        $profile = commerce_customer_profile_new('billing', $order->uid);
+
+        // Add the address value.
+        $profile_wrapper = entity_metadata_wrapper('commerce_customer_profile', $profile);
+
+        $profile_wrapper->commerce_customer_address = array_merge(addressfield_default_values(), array(
+          'country' => $ipn['residence_country'],
+          'name_line' => $ipn['first_name'] . ' ' . $ipn['last_name'],
+          'first_name' => $ipn['first_name'],
+          'last_name' => $ipn['last_name'],
+        ));
+
+        // Save the profile, reference it from the order, and save the order.
+        $profile_wrapper->save();
+        $order_wrapper->commerce_customer_billing = $profile_wrapper;
+        $order_wrapper->save();
+
+        watchdog('commerce_marketplace_paypal_wps', 'Billing profile created for Order @order_number containing the first and last names and residence country of the customer based on IPN data.', array('@order_number' => $order->order_number));
+      }
+    }
+  }
+
+  commerce_payment_redirect_pane_next_page($order);
+  watchdog('commerce_marketplace_paypal_wps', 'IPN processed for Order @order_number with ID @txn_id.', array('@txn_id' => $ipn['txn_id'], '@order_number' => $order->order_number), WATCHDOG_INFO);
+}

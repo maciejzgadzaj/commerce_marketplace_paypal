@@ -1,0 +1,66 @@
+<?php
+/**
+ * @file
+ * Installs the tables required by Commerce Marketplace PayPal.
+ */
+
+/**
+ * Implements hook_schema().
+ */
+function commerce_marketplace_paypal_schema() {
+  $schema = array();
+
+  $schema['commerce_maketplace_paypal_ipn_transaction'] = array(
+    'description' => 'Stores transaction IDs for processed IPNs.',
+    'fields' => array(
+      'ipn_transaction_id' => array(
+        'description' => 'Serial numeric ID of the IPN/payment transaction pair in the local database.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'ipn_id' => array(
+        'description' => 'Numeric ID of the IPN in the local database.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'order_id' => array(
+        'description' => 'The order ID the payment belongs to.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'transaction_id' => array(
+        'description' => 'The payment transaction ID the payment belongs to.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('ipn_transaction_id'),
+    'foreign keys' => array(
+      'ipn_id' => array(
+        'table' => 'commerce_paypal_ipn',
+        'columns'=> array('ipn_id' => 'ipn_id'),
+      ),
+      'transaction_id' => array(
+        'table' => 'commerce_payment_transaction',
+        'columns'=> array('payment_id' => 'payment_id'),
+      ),
+    ),
+    'unique keys' => array(
+      'ipn_transaction' => array('ipn_id', 'transaction_id'),
+    ),
+    'indexes' => array(
+      'ipn_id' => array('ipn_id'),
+      'order_id' => array('order_id'),
+      'transaction_id' => array('transaction_id'),
+    ),
+  );
+
+  return $schema;
+}
