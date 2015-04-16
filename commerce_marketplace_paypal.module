@@ -34,11 +34,32 @@ function commerce_marketplace_paypal_menu_alter(&$items) {
  * @see commerce_paypal_process_ipn()
  */
 function commerce_marketplace_paypal_process_ipn($payment_method = NULL, $debug_ipn = array()) {
-  // Retrieve the IPN from $_POST if the caller did not supply an IPN array.
-  // Note that Drupal has already run stripslashes() on the contents of the
-  // $_POST array at this point, so we don't need to worry about them.
+  // We do not want to retrieve the IPN data from $_POST, as original
+  // commerce_paypal_process_ipn() does it, as it might cause serialization
+  // issues with array data in the POST. Instead, we will read raw POST data
+  // from the input stream.
+  // See https://developer.paypal.com/docs/classic/ipn/ht_ipn/ and
+  // http://enjoysmile.com/blog/24/paypal-adaptive-payments-and-ipn-part-two/
+  // for more information.
   if (empty($debug_ipn)) {
-    $ipn = $_POST;
+    $raw_post_data = file_get_contents('php://input');
+
+    // Log the raw IPN if logging is enabled.
+    if (!empty($payment_method['settings']['marketplace_adaptive']['api_logging']['response'])) {
+      watchdog('commerce_marketplace_paypal', 'Received raw IPN: !ipn', array(
+        '!ipn' => '<pre>' . var_export($raw_post_data, TRUE) . '</pre>',
+      ), WATCHDOG_DEBUG);
+    }
+
+    // Convert raw POST string data to an array.
+    $ipn = commerce_marketplace_paypal_raw_post_data_to_array($raw_post_data);
+
+    // Log the decoded IPN if logging is enabled.
+    if (!empty($payment_method['settings']['marketplace_adaptive']['api_logging']['response'])) {
+      watchdog('commerce_marketplace_paypal', 'Received decoded IPN: !ipn', array(
+        '!ipn' => '<pre>' . var_export($ipn, TRUE) . '</pre>',
+      ), WATCHDOG_DEBUG);
+    }
 
     // Exit now if the $_POST was empty.
     if (empty($ipn)) {
@@ -47,11 +68,7 @@ function commerce_marketplace_paypal_process_ipn($payment_method = NULL, $debug_
     }
 
     // Prepare an array to POST back to PayPal to validate the IPN.
-    $variables = array('cmd=_notify-validate');
-
-    foreach ($ipn as $key => $value) {
-      $variables[] = $key . '=' . urlencode($value);
-    }
+    $validate_ipn = 'cmd=_notify-validate&' . $raw_post_data;
 
     // Determine the proper PayPal server to POST to.
     if (!empty($ipn['test_ipn']) && $ipn['test_ipn'] == 1) {
@@ -61,8 +78,22 @@ function commerce_marketplace_paypal_process_ipn($payment_method = NULL, $debug_
       $host = 'https://www.paypal.com/cgi-bin/webscr';
     }
 
+    // Log the IPN validation request if logging is enabled.
+    if (!empty($payment_method['settings']['marketplace_adaptive']['api_logging']['request'])) {
+      watchdog('commerce_marketplace_paypal_wps', 'IPN validation request: !request', array(
+        '!request' => '<pre>' . var_export($validate_ipn, TRUE) . '</pre>',
+      ), WATCHDOG_DEBUG);
+    }
+
     // Process the HTTP request to validate the IPN.
-    $response = drupal_http_request($host, array('method' => 'POST', 'data' => implode('&', $variables)));
+    $response = drupal_http_request($host, array('method' => 'POST', 'data' => $validate_ipn));
+
+    // Log the IPN validation response if logging is enabled.
+    if (!empty($payment_method['settings']['marketplace_adaptive']['api_logging']['response'])) {
+      watchdog('commerce_marketplace_paypal_wps', 'IPN validation response: !response', array(
+        '!response' => '<pre>' . var_export($response, TRUE) . '</pre>',
+      ), WATCHDOG_DEBUG);
+    }
 
     // If an error occurred during processing, log the message and exit.
     if (property_exists($response, 'error')) {
@@ -92,99 +123,194 @@ function commerce_marketplace_paypal_process_ipn($payment_method = NULL, $debug_
   }
 
   // Exit if the IPN has already been processed.
-  if (!empty($ipn['txn_id']) && $prior_ipn = commerce_paypal_ipn_load($ipn['txn_id'])) {
-    if ($prior_ipn['payment_status'] == $ipn['payment_status']) {
-      watchdog('commerce_marketplace_paypal', 'Attempted to process an IPN that has already been processed with transaction ID @txn_id.', array('@txn_id' => $ipn['txn_id']), WATCHDOG_NOTICE);
+  $txn_id = commerce_marketplace_paypal_ipn_txn_id($ipn);
+  if (!empty($txn_id) && $prior_ipn = commerce_paypal_ipn_load($txn_id)) {
+    if (
+      !empty($ipn['payment_status']) && $prior_ipn['payment_status'] == $ipn['payment_status']
+      || !empty($ipn['status']) && $prior_ipn['status'] == $ipn['status']
+    ) {
+      watchdog('commerce_marketplace_paypal', 'Attempted to process an IPN that has already been processed with transaction ID @txn_id.', array('@txn_id' => $txn_id), WATCHDOG_NOTICE);
       return FALSE;
     }
   }
 
-  // Load the order based on the IPN's invoice number.
-  if (!empty($ipn['invoice']) && strpos($ipn['invoice'], '-') !== FALSE) {
+//  if (!empty($ipn['invoice']) && strpos($ipn['invoice'], '-') !== FALSE) {
+//    list($ipn['order_id'], $timestamp) = explode('-', $ipn['invoice']);
+//  }
+//  elseif (!empty($ipn['invoice'])) {
+//    $ipn['order_id'] = $ipn['invoice'];
+//  }
+//  else {
+//    $ipn['order_id'] = 0;
+//    $timestamp = 0;
+//  }
+
+  // Load the order(s) based on the IPN's invoice number.
+  // WPS IPN.
+  if (!empty($ipn['invoice'])) {
     list($ipn['order_id'], $timestamp) = explode('-', $ipn['invoice']);
+    $main_order = commerce_order_load($ipn['order_id']);
+    // If payments are sent to main store, we want to process all orders from
+    // the order group, and create payment transaction for each one of them.
+    if (variable_get('commerce_store_payment_mode', COMMERCE_MARKETPLACE_PAYMENT_DEFAULT_MODE) == 'main_store') {
+      $orders = commerce_order_load_multiple(NULL, array('order_group' => $main_order->order_group), TRUE);
+    }
+    // If payments are sent to merchants though, and we did not use Adaptive
+    // Payments, we want to process only single order here (regardless of how
+    // many of them are in the order group).
+    else {
+      $orders = array($main_order);
+    }
   }
-  elseif (!empty($ipn['invoice'])) {
-    $ipn['order_id'] = $ipn['invoice'];
-  }
+  // Adaptive Payments IPN.
   else {
-    $ipn['order_id'] = 0;
-    $timestamp = 0;
+    if (!empty($ipn['transaction']) && is_array($ipn['transaction'])) {
+      $order_ids = array();
+      foreach ($ipn['transaction'] as $transaction) {
+        if (!empty($transaction['invoice'])) {
+          list($order_id, $timestamp) = explode('-', $transaction['invoice']);
+          $order_ids[] = $order_id;
+        }
+      }
+      $orders = commerce_order_load_multiple($order_ids);
+    }
+    if (!empty($ipn['transaction'])) {
+      list($ipn['order_id'], $timestamp) = explode('-', $ipn['tracking_id']);
+      // If loading orders from $ipn['transaction'] above failed for any reason,
+      // load all the orders from the order group.
+      if (empty($orders)) {
+        $main_order = commerce_order_load($ipn['order_id']);
+        $orders = commerce_order_load_multiple(NULL, array('order_group' => $main_order->order_group), TRUE);
+      }
+    }
   }
 
-  if (!empty($ipn['order_id'])) {
-    $order = commerce_order_load($ipn['order_id']);
-  }
-  else {
-    $order = FALSE;
-  }
-
-  // Marketplace-specific: loop through all orders from the order group
-  // and call IPN validation and processing functions for each one of them.
-  $group_orders = commerce_order_load_multiple(NULL, array('order_group' => $order->order_group), TRUE);
-
+  // By default we don't want to save IPN in the db. We will do it only if it
+  // validates against at least one of the orders.
   $save_ipn = FALSE;
 
-  foreach ($group_orders as $group_order) {
+  // Loop through all orders from the order group
+  // and call IPN validation and processing functions for each one of them.
+  if (!empty($orders)) {
+    foreach ($orders as $order) {
 
-    // Give the payment method module an opportunity to validate the receiver
-    // e-mail address and amount of the payment if possible. If a validate
-    // function exists, it is responsible for setting its own watchdog message.
-    if (!empty($payment_method)) {
-      $callback = $payment_method['base'] . '_paypal_ipn_validate';
+      // Give the payment method module an opportunity to validate the receiver
+      // e-mail address and amount of the payment if possible. If a validate
+      // function exists, it is responsible for setting its own watchdog message.
+      if (!empty($payment_method)) {
+        /**
+         * @see commerce_marketplace_paypal_wps_paypal_ipn_validate()
+         * @see commerce_paypal_wps_paypal_ipn_validate()
+         */
+        $callback = $payment_method['base'] . '_paypal_ipn_validate';
 
-      // Marketplace-specific: try to replace default callback function
-      // with related marketplace callback if it exists.
-      $marketplace_callback = str_replace('commerce_paypal', 'commerce_marketplace_paypal', $callback);
-      if (function_exists($marketplace_callback)) {
-        $callback = $marketplace_callback;
-      }
+        // Marketplace-specific: try to replace default callback function
+        // with related marketplace callback if it exists.
+        $marketplace_callback = str_replace('commerce_paypal', 'commerce_marketplace_paypal', $callback);
+        if (function_exists($marketplace_callback)) {
+          $callback = $marketplace_callback;
+        }
 
-      // If a validator function existed...
-      if (function_exists($callback)) {
-        // Only exit if the function explicitly returns FALSE.
-        if ($callback($group_order, $payment_method, $ipn) === FALSE) {
-          return FALSE;
+        // If a validator function existed...
+        if (function_exists($callback)) {
+          // Only exit if the function explicitly returns FALSE.
+          if ($callback($order, $payment_method, $ipn) === FALSE) {
+            return FALSE;
+          }
         }
       }
-    }
 
-    // Give the payment method module an opportunity to process the IPN.
-    if (!empty($payment_method)) {
-      $callback = $payment_method['base'] . '_paypal_ipn_process';
+      // Give the payment method module an opportunity to process the IPN.
+      if (!empty($payment_method)) {
+        /**
+         * @see commerce_marketplace_paypal_wps_paypal_ipn_process()
+         * @see commerce_paypal_wps_paypal_ipn_process()
+         */
+        $callback = $payment_method['base'] . '_paypal_ipn_process';
 
-      // Marketplace-specific: try to replace default callback function
-      // with related marketplace callback if it exists.
-      $marketplace_callback = str_replace('commerce_paypal', 'commerce_marketplace_paypal', $callback);
-      if (function_exists($marketplace_callback)) {
-        $callback = $marketplace_callback;
-      }
+        // Marketplace-specific: try to replace default callback function
+        // with related marketplace callback if it exists.
+        $marketplace_callback = str_replace('commerce_paypal', 'commerce_marketplace_paypal', $callback);
+        if (function_exists($marketplace_callback)) {
+          $callback = $marketplace_callback;
+        }
 
-      // If a processing function existed...
-      if (function_exists($callback)) {
-        // Skip saving if the function explicitly returns FALSE, meaning the IPN
-        // wasn't actually processed. For marketplace though, when processing
-        // multiple orders, if at least one of them was processed correctly,
-        // we still want to save the IPN.
-        if ($callback($group_order, $payment_method, $ipn) !== FALSE) {
-          $save_ipn = TRUE;
+        // If a processing function existed...
+        if (function_exists($callback)) {
+          // Skip saving if the function explicitly returns FALSE, meaning the IPN
+          // wasn't actually processed. For marketplace though, when processing
+          // multiple orders, if at least one of them was processed correctly,
+          // we still want to save the IPN.
+          if ($callback($order, $payment_method, $ipn) !== FALSE) {
+            $save_ipn = TRUE;
+          }
         }
       }
+
+      // Invoke the hook here so implementations have access to the order and
+      // payment method if available and a saved IPN array that includes the payment
+      // transaction ID if created in the payment method's default process callback.
+      module_invoke_all('commerce_paypal_ipn_process', $order, $payment_method, $ipn);
+
+      // Invoke an additional hook for any marketplace-specific processing.
+      module_invoke_all('commerce_marketplace_paypal_ipn_process', $order, $payment_method, $ipn);
     }
-
-    // Invoke the hook here so implementations have access to the order and
-    // payment method if available and a saved IPN array that includes the payment
-    // transaction ID if created in the payment method's default process callback.
-    module_invoke_all('commerce_paypal_ipn_process', $group_order, $payment_method, $ipn);
-
-    // Invoke an additional hook for any marketplace-specific processing.
-    module_invoke_all('commerce_marketplace_paypal_ipn_process', $group_order, $payment_method, $ipn);
   }
 
   // Save the processed IPN details.
   if ($save_ipn) {
-    commerce_paypal_ipn_save($ipn);
+    // Save the IPN.
+    if (
+      !empty($ipn['transaction_type'])
+      && $ipn['transaction_type'] == 'Adaptive Payment PAY'
+    ) {
+      commerce_marketplace_paypal_wps_adaptive_ipn_save($ipn);
+    }
+    else {
+      commerce_paypal_ipn_save($ipn);
+    }
+    // Save the relationship between IPN, all orders from the order group
+    // and all payment transactions created for all these orders.
     commerce_marketplace_paypal_ipn_transaction_save($ipn);
   }
+}
+
+/**
+ * Converts raw POST data to an array.
+ *
+ * This function should be used to convert IPN details read from PHP input
+ * stream instead of $_POST, to avoid serialization issues with array data,
+ * as recommended by PayPal IPN processing documentation.
+ *
+ * See https://developer.paypal.com/docs/classic/ipn/ht_ipn/ for more info.
+ *
+ * @param string $raw_post_data
+ * @return array
+ */
+function commerce_marketplace_paypal_raw_post_data_to_array($raw_post_data) {
+  $raw_post_array = explode('&', urldecode($raw_post_data));
+
+  $ipn = array();
+  foreach ($raw_post_array as $keyval) {
+    list($key, $value) = explode ('=', $keyval, 2);
+    // When using Adaptive Payments, PayPal returns transactions details
+    // in the multidimensional HTTP-encoded array, which unfortunately is not
+    // compatible with parse_str() or anything else for that matter. We are
+    // getting values like 'transaction%5B0%5D.is_primary_receiver=false',
+    // which need to be converted into multidimensional array using this
+    // fancy custom code.
+    if (preg_match('/([a-z]+)\[([0-9]+)\]\.([a-z_]+)/', $key, $matches)) {
+      $key = $matches[1];
+      $delta = $matches[2];
+      $subkey = $matches[3];
+      $ipn[$key][$delta][$subkey] = $value;
+    }
+    else {
+      $ipn[$key] = urldecode($value);
+    }
+  }
+
+  return $ipn;
 }
 
 /**
@@ -204,7 +330,7 @@ function commerce_marketplace_paypal_ipn_transaction_save($ipn) {
       'transaction_id' => $transaction_id,
     );
     if (!commerce_marketplace_paypal_ipn_transaction_load($record)) {
-      drupal_write_record('commerce_maketplace_paypal_ipn_transaction', $record);
+      drupal_write_record('commerce_marketplace_paypal_ipn_transaction', $record);
     }
   }
 }
@@ -221,11 +347,36 @@ function commerce_marketplace_paypal_ipn_transaction_save($ipn) {
  * @see commerce_marketplace_paypal_ipn_transaction_save()
  */
 function commerce_marketplace_paypal_ipn_transaction_load($conditions) {
-  $query = db_select('commerce_maketplace_paypal_ipn_transaction', 'cpit')
+  $query = db_select('commerce_marketplace_paypal_ipn_transaction', 'cpit')
     ->fields('cpit');
   foreach ($conditions as $key => $value) {
     $query->condition('cpit.' . $key, $value);
   }
   return $query->execute()
     ->fetchAssoc();
+}
+
+/**
+ * Returns a unique invoice number based on the Order ID and timestamp.
+ */
+function commerce_marketplace_paypal_ipn_invoice($orders) {
+  return implode('-', array_keys($orders)) . '-' . REQUEST_TIME;
+}
+
+/**
+ * Returns txn_id value from IPN based on used PayPal payment solution.
+ *
+ * @param array $ipn
+ * @return string|null
+ */
+function commerce_marketplace_paypal_ipn_txn_id($ipn) {
+  if (
+    !empty($ipn['transaction_type'])
+    && $ipn['transaction_type'] == 'Adaptive Payment PAY'
+  ) {
+    return $ipn['pay_key'];
+  }
+  elseif (!empty($ipn['txn_id'])) {
+    return $ipn['txn_id'];
+  }
 }

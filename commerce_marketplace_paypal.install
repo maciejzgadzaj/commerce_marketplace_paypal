@@ -10,7 +10,7 @@
 function commerce_marketplace_paypal_schema() {
   $schema = array();
 
-  $schema['commerce_maketplace_paypal_ipn_transaction'] = array(
+  $schema['commerce_marketplace_paypal_ipn_transaction'] = array(
     'description' => 'Stores transaction IDs for processed IPNs.',
     'fields' => array(
       'ipn_transaction_id' => array(
@@ -59,6 +59,57 @@ function commerce_marketplace_paypal_schema() {
       'ipn_id' => array('ipn_id'),
       'order_id' => array('order_id'),
       'transaction_id' => array('transaction_id'),
+    ),
+  );
+
+  $schema['commerce_marketplace_paypal_pay_chain'] = array(
+    'description' => 'Stores pay chains associated with orders.',
+    'fields' => array(
+      'pay_chain_id' => array(
+        'description' => 'Serial numeric ID of the pay chain in the local database.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'order_group' => array(
+        'description' => 'The order group ID the pay chain belongs to.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'pay_key' => array(
+        'description' => 'The PayPal pay key associated with this pay chain.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'currency' => array(
+        'description' => 'The currency code of the pay chain.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'data' => array(
+        'type' => 'blob',
+        'not null' => FALSE,
+        'size' => 'big',
+        'serialize' => TRUE,
+        'description' => 'A serialized array representing the pay chain.',
+      ),
+    ),
+    'primary key' => array('pay_chain_id'),
+    'foreign keys' => array(
+      'order_group' => array(
+        'table' => 'commerce_order',
+        'columns'=> array('order_group' => 'order_group'),
+      ),
+    ),
+    'indexes' => array(
+      'order_id' => array('order_group'),
+      'pay_key' => array('pay_key'),
     ),
   );
 
