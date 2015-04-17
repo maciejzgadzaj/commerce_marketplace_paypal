@@ -153,7 +153,7 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
 
   // Log the request if logging is enabled.
   if (!empty($payment_method['settings']['marketplace_adaptive']['api_logging']['request'])) {
-    watchdog('commerce_marketplace_paypal_wps', 'Adaptive Payments pay key request: !request', array(
+    watchdog('commerce_marketplace_paypal_wps', 'Adaptive Payments: pay key request: !request', array(
       '!request' => '<pre>' . var_export($pay_request, TRUE) . '</pre>',
     ), WATCHDOG_DEBUG);
   }
@@ -186,14 +186,14 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
 
   // Log the cURL response if logging is enabled.
   if (!empty($payment_method['settings']['marketplace_adaptive']['api_logging']['response'])) {
-    watchdog('commerce_marketplace_paypal_wps', 'Adaptive Payments pay key cURL response: !response', array(
+    watchdog('commerce_marketplace_paypal_wps', 'Adaptive Payments: pay key cURL response: !response', array(
       '!response' => '<pre>' . var_export($result, TRUE) . '</pre>',
     ), WATCHDOG_DEBUG);
   }
 
   // Log any errors to the watchdog.
   if ($error = curl_error($ch)) {
-    watchdog('commerce_marketplace_paypal_wps', 'cURL error: @error', array('@error' => $error), WATCHDOG_ERROR);
+    watchdog('commerce_marketplace_paypal_wps', 'Adaptive Payments: cURL error: @error', array('@error' => $error), WATCHDOG_ERROR);
     return FALSE;
   }
   curl_close($ch);
@@ -204,7 +204,7 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
 
   // Log the response if logging is enabled.
   if (!empty($payment_method['settings']['marketplace_adaptive']['api_logging']['response'])) {
-    watchdog('commerce_marketplace_paypal_wps', 'Adaptive Payments pay key response: !response', array(
+    watchdog('commerce_marketplace_paypal_wps', 'Adaptive Payments: pay key response: !response', array(
       '!response' => '<pre>' . var_export($result, TRUE) . '</pre>',
     ), WATCHDOG_DEBUG);
   }
@@ -230,7 +230,7 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
   }
   // Otherwise log an error to the watchdog.
   else {
-    watchdog('commerce_marketplace_paypal_wps', 'Failed to retrieve the pay key for order @order_number. PayPal response: !response', array(
+    watchdog('commerce_marketplace_paypal_wps', 'Adaptive Payments: failed to retrieve the pay key for order @order_number. PayPal response: !response', array(
       '@order_number' => $order->order_number,
       '!response' => '<pre>'. check_plain(print_r($result, TRUE)) .'</pre>'
     ), WATCHDOG_ERROR);
@@ -391,7 +391,7 @@ function commerce_marketplace_paypal_wps_adaptive_paypal_ipn_process($order, $pa
 //  }
 
   commerce_payment_redirect_pane_next_page($order);
-  watchdog('commerce_marketplace_paypal_wps', 'Adaptive IPN processed for order @order_number with ID @txn_id.', array(
+  watchdog('commerce_marketplace_paypal_wps', 'Adaptive Payments: IPN processed for order @order_number with ID @txn_id.', array(
     '@order_number' => $order->order_number,
     '@txn_id' => $ipn_transaction['id_for_sender_txn'],
   ), WATCHDOG_INFO);
