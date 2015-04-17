@@ -1,0 +1,171 @@
+<?php
+/**
+ * @file
+ * Installs the tables required by Commerce Marketplace PayPal WPS.
+ */
+
+/**
+ * Implements hook_schema().
+ */
+function commerce_marketplace_paypal_wps_schema() {
+  $schema = array();
+
+  $schema['commerce_marketplace_paypal_wps_adaptive_ipn'] = array(
+    'description' => 'Stores PayPal Adaptive Payments IPN transaction details.',
+    'fields' => array(
+      'ipn_adaptive_id' => array(
+        'description' => 'Serial numeric ID of the IPN/transaction pair in the local database.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'ipn_id' => array(
+        'description' => 'Numeric ID of the IPN in the local database.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'id' => array(
+        'description' => 'The PayPal transaction ID.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'id_for_sender_txn' => array(
+        'description' => 'The transaction ID for the sender.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'receiver' => array(
+        'description' => 'The e-mail of the payment receiever.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'is_primary_receiver' => array(
+        'description' => 'The receiver status for chained payments.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'amount' => array(
+        'description' => 'The payment amount.',
+        'type' => 'numeric',
+        'size' => 'normal',
+        'precision' => 10,
+        'scale' => 2,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'currency' => array(
+        'description' => 'The currency code of the payment.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'status_for_sender_txn' => array(
+        'description' => 'The status of the payment at PayPal.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'order_id' => array(
+        'description' => 'The order ID the payment belongs to.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'transaction_id' => array(
+        'description' => 'The payment transaction ID the payment belongs to.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('ipn_adaptive_id'),
+    'foreign keys' => array(
+      'fk_ipn_id' => array(
+        'table' => 'commerce_paypal_ipn',
+        'columns'=> array('ipn_id' => 'ipn_id'),
+      ),
+      'fk_transaction_id' => array(
+        'table' => 'commerce_payment_transaction',
+        'columns'=> array('payment_id' => 'payment_id'),
+      ),
+    ),
+    'unique keys' => array(
+      'uk_ipn_id_id' => array('ipn_id', 'id'),
+      'uk_ipn_id_transaction_id' => array('ipn_id', 'transaction_id'),
+    ),
+    'indexes' => array(
+      'ix_ipn_id' => array('ipn_id'),
+      'ix_id' => array('id'),
+      'ix_id_for_sender_txn' => array('id_for_sender_txn'),
+      'ix_order_id' => array('order_id'),
+      'ix_transaction_id' => array('transaction_id'),
+    ),
+  );
+
+  $schema['commerce_marketplace_paypal_wps_adaptive_pay_chain'] = array(
+    'description' => 'Stores PayPal Adaptive Payments pay chains associated with orders.',
+    'fields' => array(
+      'pay_chain_id' => array(
+        'description' => 'Serial numeric ID of the pay chain in the local database.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'order_group' => array(
+        'description' => 'The order group ID the pay chain belongs to.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'pay_key' => array(
+        'description' => 'The PayPal pay key associated with this pay chain.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'currency' => array(
+        'description' => 'The currency code of the pay chain.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'data' => array(
+        'type' => 'blob',
+        'not null' => FALSE,
+        'size' => 'big',
+        'serialize' => TRUE,
+        'description' => 'A serialized array representing the pay chain.',
+      ),
+    ),
+    'primary key' => array('pay_chain_id'),
+    'foreign keys' => array(
+      'fk_order_group' => array(
+        'table' => 'commerce_order',
+        'columns'=> array('order_group' => 'order_group'),
+      ),
+    ),
+    'indexes' => array(
+      'ix_order_group' => array('order_group'),
+      'ix_pay_key' => array('pay_key'),
+    ),
+  );
+
+  return $schema;
+}

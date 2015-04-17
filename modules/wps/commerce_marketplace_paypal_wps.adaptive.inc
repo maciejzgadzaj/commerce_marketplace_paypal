@@ -57,14 +57,16 @@ function commerce_marketplace_paypal_wps_adaptive_command($payment_action) {
  */
 function commerce_marketplace_paypal_wps_adaptive_default_settings() {
   return array(
+    'api_logging' => array(),
     'marketplace_adaptive' => array(
       'payment_type' => 'parallel',
       'application_id' => '',
       'api_username' => '',
       'api_password' => '',
       'api_signature' => '',
+      'payment_type' => 'parallel',
+      'fees_payer' => 'EACHRECEIVER',
       'reverse_all_parallel_payments_on_error' => 'true',
-      'api_logging' => array(),
     ),
   );
 }
@@ -148,12 +150,15 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
     'cancelUrl' => $form['cancel_return']['#value'],
     'returnUrl' => $form['return']['#value'],
     'ipnNotificationUrl' => $form['notify_url']['#value'],
+    'feesPayer' => $payment_method['settings']['marketplace_adaptive']['fees_payer'],
     'reverseAllParallelPaymentsOnError' => $payment_method['settings']['marketplace_adaptive']['reverse_all_parallel_payments_on_error'],
   );
-//  dpm($pay_request, '$pay_request');
+
+  // Allow other modules to alter the request.
+  drupal_alter('commerce_marketplace_paypal_wps_adaptive_get_paykey', $pay_request, $order, $payment_method);
 
   // Log the request if logging is enabled.
-  if (!empty($payment_method['settings']['marketplace_adaptive']['api_logging']['request'])) {
+  if (!empty($payment_method['settings']['api_logging']['request'])) {
     watchdog('commerce_marketplace_paypal_wps', 'Adaptive Payments: pay key request: !request', array(
       '!request' => '<pre>' . var_export($pay_request, TRUE) . '</pre>',
     ), WATCHDOG_DEBUG);
@@ -186,7 +191,7 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
   $result = curl_exec($ch);
 
   // Log the cURL response if logging is enabled.
-  if (!empty($payment_method['settings']['marketplace_adaptive']['api_logging']['response'])) {
+  if (!empty($payment_method['settings']['api_logging']['response'])) {
     watchdog('commerce_marketplace_paypal_wps', 'Adaptive Payments: pay key cURL response: !response', array(
       '!response' => '<pre>' . var_export($result, TRUE) . '</pre>',
     ), WATCHDOG_DEBUG);
@@ -204,7 +209,7 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
 //  dpm($result, '$result');
 
   // Log the response if logging is enabled.
-  if (!empty($payment_method['settings']['marketplace_adaptive']['api_logging']['response'])) {
+  if (!empty($payment_method['settings']['api_logging']['response'])) {
     watchdog('commerce_marketplace_paypal_wps', 'Adaptive Payments: pay key response: !response', array(
       '!response' => '<pre>' . var_export($result, TRUE) . '</pre>',
     ), WATCHDOG_DEBUG);
@@ -214,7 +219,7 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
   if (strtolower($result->responseEnvelope->ack) == 'success' && !empty($result->payKey)) {
     // Before saving received pay key, make sure there are no old pay chains
     // for the current order still existing in the database.
-    db_delete('commerce_marketplace_paypal_pay_chain')
+    db_delete('commerce_marketplace_paypal_wps_adaptive_pay_chain')
       ->condition('order_group', $order->order_group)
       ->execute();
 
@@ -225,7 +230,7 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
       'currency' => $form['currency_code']['#value'],
       'data' => $receivers,
     );
-    drupal_write_record('commerce_marketplace_paypal_pay_chain', $pay_chain);
+    drupal_write_record('commerce_marketplace_paypal_wps_adaptive_pay_chain', $pay_chain);
 
     return $result->payKey;
   }
@@ -240,6 +245,25 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
 }
 
 /**
+ *
+ *
+ * @param array $ipn
+ *   An IPN to check the transaction type of.
+ *
+ * @return bool
+ *   A boolean indicating whether it is Adaptive Payments IPN or not.
+ */
+function commerce_marketplace_paypal_wps_ipn_is_adaptive($ipn) {
+  if (
+    !empty($ipn['transaction_type'])
+    && $ipn['transaction_type'] == 'Adaptive Payment PAY'
+  ) {
+    return TRUE;
+  }
+  return FALSE;
+}
+
+/**
  * Payment method callback: process an IPN once it's been validated.
  *
  * Overrides commerce_paypal_wps_paypal_ipn_process()
@@ -248,9 +272,10 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
  * @see commerce_paypal_wps_paypal_ipn_process()
  */
 function commerce_marketplace_paypal_wps_adaptive_paypal_ipn_process($order, $payment_method, &$ipn) {
-  foreach ($ipn['transaction'] as $transaction) {
+  foreach ($ipn['transaction'] as $delta => $transaction) {
     list($order_id, $timestamp) = explode('-', $transaction['invoice']);
     if ($order_id == $order->order_id) {
+      $ipn_transaction_delta = $delta;
       $ipn_transaction = $transaction;
     }
   }
@@ -258,7 +283,6 @@ function commerce_marketplace_paypal_wps_adaptive_paypal_ipn_process($order, $pa
   // Do not perform any processing on WPS transactions here that do not have
   // transaction IDs, indicating they are non-payment IPNs such as those used
   // for subscription signup requests.
-  // @TODO: Do we actually really need it for Adaptive Payments?
   if (empty($ipn_transaction['id_for_sender_txn'])) {
     return FALSE;
   }
@@ -274,6 +298,9 @@ function commerce_marketplace_paypal_wps_adaptive_paypal_ipn_process($order, $pa
 
   // If this is a prior authorization capture IPN for which we've already
   // created a transaction...
+  // @TODO: this is not tested for Adaptive Payments at all yet.
+  // Probably doesn't work then, and actually awaits adding authorisation
+  // support to this module.
   if (
     in_array($ipn_transaction['status'], array('Voided', 'Completed'), TRUE)
     && !empty($ipn['auth_id'])
@@ -282,12 +309,12 @@ function commerce_marketplace_paypal_wps_adaptive_paypal_ipn_process($order, $pa
     // Load the prior IPN's transaction and update that with the capture values.
     // Marketplace-specific: we might have multiple payment transactions for
     // one IPN, so to load the correct transaction we first need to get its ID
-    // from commerce_marketplace_paypal_ipn_transaction table based on order ID.
+    // from commerce_marketplace_paypal_wps_adaptive_ipn table based on order ID.
     $conditions = array(
       'ipn_id' => $auth_ipn['ipn_id'],
       'order_id' => $order->order_id,
     );
-    $relationship = commerce_marketplace_paypal_ipn_transaction_load($conditions);
+    $relationship = commerce_marketplace_paypal_wps_adaptive_ipn_load($conditions);
     $transaction = commerce_payment_transaction_load($relationship['transaction_id']);
   }
   else {
@@ -345,51 +372,11 @@ function commerce_marketplace_paypal_wps_adaptive_paypal_ipn_process($order, $pa
 
   // Save the transaction information.
   commerce_payment_transaction_save($transaction);
-  $ipn['transaction_id'] = $transaction->transaction_id;
-
-  // Marketplace-specific: we also need a connection between *all* created
-  // payment transactions and the IPN, which cannot be saved in the main
-  // commerce_paypal_ipn table, where 'transaction_id' column is defined as int
-  // (see commerce_paypal_schema()) - therefore we need to save it
-  // in a different table, allowing for one-to-many relationships between
-  // IPN ID and transaction ID.
-  // See commerce_marketplace_paypal_ipn_transaction_save().
-  $ipn['transaction_ids'][$order->order_id] = $transaction->transaction_id;
-
-  // Create a billing profile based on the IPN if enabled.
-  // @TODO: Not tested yet.
-//  if (!empty($payment_method['settings']['ipn_create_billing_profile']) && isset($order->commerce_customer_billing)) {
-//
-//    // If this order does not have a billing profile yet...
-//    if ($order_wrapper->commerce_customer_billing->value() === NULL) {
-//      // Ensure we have the required data in the IPN.
-//      if (empty($ipn['residence_country']) || empty($ipn['first_name']) || empty($ipn['last_name'])) {
-//        $data = array_intersect_key($ipn, drupal_map_assoc(array('residence_country', 'first_name', 'last_name')));
-//        watchdog('commerce_marketplace_paypal_wps', 'A billing profile for Order @order_number could not be created due to insufficient data in the IPN:!data', array('@order_number' => $order->order_number, '!data' => '<pre>'. check_plain(print_r($data, TRUE)) .'</pre>'), WATCHDOG_WARNING);
-//      }
-//      else {
-//        // Create the new profile now.
-//        $profile = commerce_customer_profile_new('billing', $order->uid);
-//
-//        // Add the address value.
-//        $profile_wrapper = entity_metadata_wrapper('commerce_customer_profile', $profile);
-//
-//        $profile_wrapper->commerce_customer_address = array_merge(addressfield_default_values(), array(
-//          'country' => $ipn['residence_country'],
-//          'name_line' => $ipn['first_name'] . ' ' . $ipn['last_name'],
-//          'first_name' => $ipn['first_name'],
-//          'last_name' => $ipn['last_name'],
-//        ));
-//
-//        // Save the profile, reference it from the order, and save the order.
-//        $profile_wrapper->save();
-//        $order_wrapper->commerce_customer_billing = $profile_wrapper;
-//        $order_wrapper->save();
-//
-//        watchdog('commerce_marketplace_paypal_wps', 'Billing profile created for Order @order_number containing the first and last names and residence country of the customer based on IPN data.', array('@order_number' => $order->order_number));
-//      }
-//    }
-//  }
+  // Add order_id and transaction_id to the IPN's transaction subarray so that
+  // we can save it in commerce_marketplace_paypal_wps_adaptive_ipn table in
+  // commerce_marketplace_paypal_wps_commerce_marketplace_paypal_ipn_save().
+  $ipn['transaction'][$ipn_transaction_delta]['order_id'] = $order->order_id;
+  $ipn['transaction'][$ipn_transaction_delta]['transaction_id'] = $transaction->transaction_id;
 
   commerce_payment_redirect_pane_next_page($order);
   watchdog('commerce_marketplace_paypal_wps', 'Adaptive Payments: IPN processed for order @order_number with ID @txn_id.', array(
@@ -399,38 +386,22 @@ function commerce_marketplace_paypal_wps_adaptive_paypal_ipn_process($order, $pa
 }
 
 /**
- * Saves an IPN with some meta data related to local processing.
+ * Loads the relationship between IPN and payment transaction.
  *
- * @param $ipn
- *   An IPN array with additional parameters for the order_id and Commerce
- *     Payment transaction_id associated with the IPN.
+ * @param array $conditions
+ *   An array of condition to use for loading the relationship.
  *
- * @return
- *   The operation performed by drupal_write_record() on save; since the IPN is
- *     received by reference, it will also contain the serial numeric ipn_id
- *     used locally.
+ * @return array|null
+ *   A relationship as an array or NULL if nothing was found.
  *
- * @see commerce_marketplace_paypal_process_ipn()
- * @see commerce_paypal_ipn_save()
+ * @see commerce_marketplace_paypal_wps_adaptive_ipn_save()
  */
-function commerce_marketplace_paypal_wps_adaptive_ipn_save(&$ipn) {
-  // PayPal Adaptive Payments IPNs have a different format than standard WPS
-  // IPNs, so we need to do a bit of moving stuff around.
-  // @TODO: this is completely not finished, still requires doing it properly
-  // - rethinking and refactoring.
-  $ipn['txn_id'] = $ipn['pay_key'];
-  $ipn['txn_type'] = $ipn['transaction_type'];
-  $ipn['payer_email'] = $ipn['sender_email'];
-
-  if (!empty($ipn['ipn_id']) && commerce_paypal_ipn_load($ipn['pay_key'])) {
-    $ipn['changed'] = REQUEST_TIME;
-
-    return drupal_write_record('commerce_paypal_ipn', $ipn, 'ipn_id');
+function commerce_marketplace_paypal_wps_adaptive_ipn_load($conditions) {
+  $query = db_select('commerce_marketplace_paypal_wps_adaptive_ipn', 'ai')
+    ->fields('ai');
+  foreach ($conditions as $key => $value) {
+    $query->condition('ai.' . $key, $value);
   }
-  else {
-    $ipn['created'] = REQUEST_TIME;
-    $ipn['changed'] = REQUEST_TIME;
-
-    return drupal_write_record('commerce_paypal_ipn', $ipn);
-  }
+  return $query->execute()
+    ->fetchAssoc();
 }

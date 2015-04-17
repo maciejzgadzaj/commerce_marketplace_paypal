@@ -5,18 +5,30 @@
  */
 
 /**
+ * PayPal Adaptive Payments-specific features.
+ */
+include_once 'commerce_marketplace_paypal_wps.adaptive.inc';
+
+/**
  * Implements hook_commerce_payment_method_info_alter().
+ *
+ * Adds support for parallel and chained payments to PayPal WPS
+ * payment method definition.
  *
  * @see commerce_paypal_wps_commerce_payment_method_info()
  */
 function commerce_marketplace_paypal_wps_commerce_payment_method_info_alter(&$payment_methods) {
   if (isset($payment_methods['paypal_wps'])) {
     $payment_methods['paypal_wps']['parallel'] = TRUE;
+    $payment_methods['paypal_wps']['chained'] = TRUE;
   }
 }
 
 /**
  * Implements hook_form_FORM_ID_alter() for rules_ui_edit_element.
+ *
+ * Alters PayPal WPS payment method settings form adding
+ * PayPal Adaptive Payments-specific configuration.
  *
  * @see commerce_paypal_wps_settings_form()
  */
@@ -25,28 +37,43 @@ function commerce_marketplace_paypal_wps_form_rules_ui_edit_element_alter(&$form
     !empty($form_state['element_settings']['payment_method']['method_id'])
     && $form_state['element_settings']['payment_method']['method_id'] == 'paypal_wps'
   ) {
-    module_load_include('inc', 'commerce_marketplace_paypal_wps', 'includes/adaptive');
-
     $settings = $form_state['element_settings']['payment_method']['settings'];
     // Merge default settings into the stored settings array.
     $settings = array_replace_recursive(commerce_marketplace_paypal_wps_adaptive_default_settings(), $settings);
 
+    // API request/response logging is not really related specifically to
+    // Adaptive Payments, so we'll add it outsite of Adaptive Payments fieldset.
+    $form['parameter']['payment_method']['settings']['payment_method']['settings']['api_logging'] = array(
+      '#type' => 'checkboxes',
+      '#title' => t('Log the following messages for debugging'),
+      '#options' => array(
+        'request' => t('API request messages'),
+        'response' => t('API response messages'),
+      ),
+      '#default_value' => $settings['api_logging'],
+    );
+
+    // Settings specific to PayPal Adaptive Payments.
+    $description = t('For more information on obtaining the following details, see the <a href="@sandbox_doc_url">PayPal Sandbox</a> documentation, <a href="@sandbox_url">Getting Your API Test Credentials</a> and <a href="@live_url">Obtaining your live PayPal credentials</a>.', array(
+      '@sandbox_doc_url' => url('https://developer.paypal.com/docs/classic/lifecycle/ug_sandbox/'),
+      '@sandbox_url' => url('https://developer.paypal.com/docs/classic/lifecycle/sb_credentials/'),
+      '@live_url' => url('https://developer.paypal.com/docs/classic/lifecycle/goingLive/#credentials'),
+    ));
     $form['parameter']['payment_method']['settings']['payment_method']['settings']['marketplace_adaptive'] = array(
       '#type' => 'fieldset',
       '#title' => t('Marketplace Adaptive Payments settings'),
+      '#description' => $description,
     );
     $subform = &$form['parameter']['payment_method']['settings']['payment_method']['settings']['marketplace_adaptive'];
 
     $subform['application_id'] = array(
       '#type' => 'textfield',
       '#title' => t('PayPal application id'),
-      '#description' => t('Your PayPal application\'s identification, issued by PayPal. See <a href="@sandbox_url">Getting Your API Test Credentials</a> and <a href="@live_url">Obtaining your live PayPal credentials</a> for more information.', array(
-        '@sandbox_url' => url('https://developer.paypal.com/docs/classic/lifecycle/sb_credentials/'),
-        '@live_url' => url('https://developer.paypal.com/docs/classic/lifecycle/goingLive/#credentials'),
-      )),
+      '#description' => t('Your PayPal application\'s identification, issued by PayPal.'),
       '#default_value' => $settings['marketplace_adaptive']['application_id'],
       '#required' => TRUE,
     );
+
     $subform['api_username'] = array(
       '#type' => 'textfield',
       '#title' => t('PayPal API username'),
@@ -54,6 +81,7 @@ function commerce_marketplace_paypal_wps_form_rules_ui_edit_element_alter(&$form
       '#default_value' => $settings['marketplace_adaptive']['api_username'],
       '#required' => TRUE,
     );
+
     $subform['api_password'] = array(
       '#type' => 'textfield',
       '#title' => t('PayPal API password'),
@@ -61,6 +89,7 @@ function commerce_marketplace_paypal_wps_form_rules_ui_edit_element_alter(&$form
       '#default_value' => $settings['marketplace_adaptive']['api_password'],
       '#required' => TRUE,
     );
+
     $subform['api_signature'] = array(
       '#type' => 'textfield',
       '#title' => t('PayPal API signature'),
@@ -68,6 +97,7 @@ function commerce_marketplace_paypal_wps_form_rules_ui_edit_element_alter(&$form
       '#default_value' => $settings['marketplace_adaptive']['api_signature'],
       '#required' => TRUE,
     );
+
     $subform['payment_type'] = array(
       '#type' => 'select',
       '#title' => t('Payment type'),
@@ -81,6 +111,26 @@ function commerce_marketplace_paypal_wps_form_rules_ui_edit_element_alter(&$form
       '#default_value' => $settings['marketplace_adaptive']['payment_type'],
       '#required' => TRUE,
     );
+
+    $description = array(
+      t('<code>SENDER</code> - Sender pays all fees (for personal, implicit simple/parallel payments; do not use for chained or unilateral payments)'),
+      t('<code>PRIMARYRECEIVER</code> - Primary receiver pays all fees (chained payments only)'),
+      t('<code>EACHRECEIVER</code> - Each receiver pays their own fee (default, personal and unilateral payments)'),
+      t('<code>SECONDARYONLY</code> - Secondary receivers pay all fees (use only for chained payments with one secondary receiver)'),
+    );
+    $subform['fees_payer'] = array(
+      '#type' => 'select',
+      '#title' => t('The payer of PayPal fees'),
+      '#description' => theme('item_list', array('items' => $description)),
+      '#options' => array(
+        'SENDER' => t('sender'),
+        'PRIMARYRECEIVER' => t('primary receiver'),
+        'EACHRECEIVER' => t('each receiver'),
+        'SECONDARYONLY' => t('secondary receiver'),
+      ),
+      '#default_value' => $settings['marketplace_adaptive']['fees_payer'],
+    );
+
     $subform['reverse_all_parallel_payments_on_error'] = array(
       '#type' => 'select',
       '#title' => t('Reverse parallel payments on error'),
@@ -93,15 +143,6 @@ function commerce_marketplace_paypal_wps_form_rules_ui_edit_element_alter(&$form
       ),
       '#default_value' => $settings['marketplace_adaptive']['reverse_all_parallel_payments_on_error'],
     );
-    $subform['api_logging'] = array(
-      '#type' => 'checkboxes',
-      '#title' => t('Log the following messages for debugging'),
-      '#options' => array(
-        'request' => t('API request messages'),
-        'response' => t('API response messages'),
-      ),
-      '#default_value' => $settings['marketplace_adaptive']['api_logging'],
-    );
 
     // Add info on 'Payment action' element about missing support
     // for Authorization action when using PayPal Adaptive Payments.
@@ -113,7 +154,7 @@ function commerce_marketplace_paypal_wps_form_rules_ui_edit_element_alter(&$form
  * Implements hook_form_FORM_ID_alter() for commerce_marketplace_payment_method_form.
  *
  * Alters PayPal WPS payment method configuration form used for stores,
- * unsetting few options which store owners doesn't have to or shouldn't have
+ * removing few options which store owners don't have to or shouldn't have
  * access to.
  *
  * @see commerce_marketplace_payment_method_form()
@@ -147,18 +188,23 @@ function commerce_marketplace_paypal_wps_form_commerce_paypal_wps_redirect_form_
   // needs to be sent as a parameter when redirecting customer to PayPal.
   // This is added in commerce_marketplace_payment_redirect_pane_checkout_form().
   if (!empty($order->data['commerce_marketplace_payment_parallel'])) {
-    module_load_include('inc', 'commerce_marketplace_paypal_wps', 'includes/adaptive');
+
+    // Before the redirect form could be submitted and customer actually
+    // redirected to PayPayl, when using Adaptive Payments first we need to send
+    // all the information about payments being requested to PayPal in the
+    // backgroun, then PayPal should return us the 'pay key', only using which
+    // we can redirect a customer to PayPal to confirm the payment.
     $pay_key = commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state);
 
     // If there was an error getting the pay key from PayPal, we do not want
-    // to redirect the user to PayPal.
+    // to redirect the user there, as they will be rejected.
     if ($pay_key === FALSE) {
       // Move all order to the previous checkout step and redirect back.
       $group_orders = commerce_order_load_multiple(NULL, array('order_group' => $order->order_group));
       foreach ($group_orders as $group_order) {
         commerce_payment_redirect_pane_previous_page($group_order, t('Failed to retrieve PayPal Adaptive Payments pay key.'));
       }
-      drupal_set_message(t('There was an error processing your payment.'), 'error');
+      drupal_set_message(t('There was an error processing your payment with PayPal. Please try again or contact us if the problem persists.'), 'error');
       drupal_goto(commerce_checkout_order_uri($order));
     }
 
@@ -179,36 +225,50 @@ function commerce_marketplace_paypal_wps_form_commerce_paypal_wps_redirect_form_
 }
 
 /**
- * Payment method callback: validate an IPN based on receiver e-mail address,
- *   price, and other parameters as possible.
+ * Provides marketplace-specific PayPal WPS IPN validation.
  *
+ * @param object $order
+ *   An order which the IPN should be validated against.
+ * @param array $payment_method
+ *   The payment method definition.
+ * @param array $ipn
+ *   An array of IPN values.
+ *
+ * @return bool
+ *   A boolean indicating whether the IPN was validated or not.
+ *
+ * @see commerce_marketplace_paypal_process_ipn()
  * @see commerce_paypal_wps_paypal_ipn_validate()
+ */
+/**
  */
 function commerce_marketplace_paypal_wps_paypal_ipn_validate($order, $payment_method, $ipn) {
   // Prepare a trimmed list of receiver e-mail addresses.
-  $receiver_emails = commerce_marketplace_paypal_wps_receiver_emails($order, $payment_method);
+  $defined_receiver_emails = commerce_marketplace_paypal_wps_receiver_emails($order, $payment_method);
 
-  // Return FALSE if the receiver e-mail does not match one specified by the
-  // payment method instance.
-  // WPS.
+  // Get the payment receiver's email from the WPS IPN.
   if (!empty($ipn['receiver_email'])) {
-    $receiver_email = $ipn['receiver_email'];
+    $ipn_receiver_email = $ipn['receiver_email'];
   }
-  // Adaptive Payments.
+  // Get the payment receiver's email from the Adaptive Payments IPN.
   elseif (!empty($ipn['transaction']) && is_array($ipn['transaction'])) {
     foreach ($ipn['transaction'] as $transaction) {
-      list($order_id, $timestamp) = explode('-', $transaction['invoice']);
+      list($order_id, ) = explode('-', $transaction['invoice']);
       if ($order_id == $order->order_id && !empty($transaction['receiver'])) {
-        $receiver_email = $transaction['receiver'];
+        $ipn_receiver_email = $transaction['receiver'];
       }
     }
   }
-  if (!in_array(trim(strtolower($receiver_email)), $receiver_emails)) {
+  $ipn_receiver_email = trim(strtolower($ipn_receiver_email));
+
+  // Return FALSE if the receiver e-mail does not match one specified by the
+  // payment method instance.
+  if (!in_array($ipn_receiver_email, $defined_receiver_emails)) {
     commerce_payment_redirect_pane_previous_page($order);
     watchdog('commerce_paypal_wps', 'IPN rejected for order @order_number: invalid receiver e-mail specified (@receiver_email); must match one of the e-mail addresses on the PayPal account. (@receiver_emails)', array(
       '@order_number' => $order->order_number,
       '@receiver_email' => $ipn['receiver_email'],
-      '@receiver_emails' => implode(', ', $receiver_emails),
+      '@receiver_emails' => implode(', ', $defined_receiver_emails),
     ), WATCHDOG_NOTICE);
     return FALSE;
   }
@@ -224,15 +284,15 @@ function commerce_marketplace_paypal_wps_paypal_ipn_validate($order, $payment_me
   }
 
   // Log a message including the PayPal transaction ID if available.
-  if ($txn_id = commerce_marketplace_paypal_ipn_txn_id($ipn)) {
-    watchdog('commerce_paypal_wps', 'IPN validated for Order @order_number with ID @txn_id.!ipn_data', array(
+  if ($txn_id = commerce_marketplace_paypal_ipn_get_variable($ipn, 'txn_id')) {
+    watchdog('commerce_paypal_wps', 'IPN @txn_id validated for order @order_number. !ipn_data', array(
       '@order_number' => $order->order_number,
       '@txn_id' => $txn_id,
       '!ipn_data' => $ipn_data,
     ), WATCHDOG_NOTICE);
   }
   else {
-    watchdog('commerce_paypal_wps', 'IPN validated for Order @order_number.!ipn_data', array(
+    watchdog('commerce_paypal_wps', 'IPN validated for order @order_number. !ipn_data', array(
       '@order_number' => $order->order_number,
       '!ipn_data' => $ipn_data,
     ), WATCHDOG_NOTICE);
@@ -240,20 +300,28 @@ function commerce_marketplace_paypal_wps_paypal_ipn_validate($order, $payment_me
 }
 
 /**
- * Payment method callback: process an IPN once it's been validated.
+ * Processes an IPN once it has been validated.
  *
  * Overrides commerce_paypal_wps_paypal_ipn_process()
  *
+ * @param object $order
+ *   An order which the IPN should be validated against.
+ * @param array $payment_method
+ *   The payment method definition.
+ * @param array $ipn
+ *   An array of IPN values.
+ *
+ * @return bool
+ *   A boolean indicating whether the IPN was successfully processed or not.
+ *
+ * @see commerce_marketplace_paypal_process_ipn()
  * @see commerce_paypal_wps_paypal_ipn_process()
  */
 function commerce_marketplace_paypal_wps_paypal_ipn_process($order, $payment_method, &$ipn) {
-  // IPN format for PayPal Adaptive Payments is almost completely different,
-  // thus its processing needs to be different as well.
-  if (
-    !empty($ipn['transaction_type'])
-    && $ipn['transaction_type'] == 'Adaptive Payment PAY'
-  ) {
-    module_load_include('inc', 'commerce_marketplace_paypal_wps', 'includes/adaptive');
+  // IPN format for PayPal Adaptive Payments is quite different,
+  // therefore its processing needs to be different as well.
+  // Let's outsource it to a different function then.
+  if (commerce_marketplace_paypal_wps_ipn_is_adaptive($ipn)) {
     return commerce_marketplace_paypal_wps_adaptive_paypal_ipn_process($order, $payment_method, $ipn);
   }
 
@@ -280,12 +348,12 @@ function commerce_marketplace_paypal_wps_paypal_ipn_process($order, $payment_met
     // Load the prior IPN's transaction and update that with the capture values.
     // Marketplace-specific: we might have multiple payment transactions for
     // one IPN, so to load the correct transaction we first need to get its ID
-    // from commerce_marketplace_paypal_ipn_transaction table based on order ID.
+    // from commerce_marketplace_paypal_wps_adaptive_ipn table based on order ID.
     $conditions = array(
       'ipn_id' => $auth_ipn['ipn_id'],
       'order_id' => $order->order_id,
     );
-    $relationship = commerce_marketplace_paypal_ipn_transaction_load($conditions);
+    $relationship = commerce_marketplace_paypal_wps_adaptive_ipn_load($conditions);
     $transaction = commerce_payment_transaction_load($relationship['transaction_id']);
   }
   else {
@@ -394,8 +462,12 @@ function commerce_marketplace_paypal_wps_paypal_ipn_process($order, $payment_met
  * Returns an array of payment receiver emails based on selected payment mode.
  *
  * @param object $order
+ *   An order which the IPN is being processed against.
  * @param array $payment_method
+ *   A payment method used.
+ *
  * @return array
+ *   An array of payment recipient emails.
  */
 function commerce_marketplace_paypal_wps_receiver_emails($order, $payment_method) {
   $receiver_emails = array();
@@ -434,4 +506,131 @@ function commerce_marketplace_paypal_wps_receiver_emails($order, $payment_method
   }
 
   return $receiver_emails;
+}
+
+/**
+ * Implements hook_commerce_marketplace_paypal_ipn_txn_id_alter().
+ *
+ * Some specific processing for PayPal Adaptive Payments IPNs.
+ *
+ * @see commerce_marketplace_paypal_process_ipn()
+ */
+function commerce_marketplace_paypal_wps_commerce_marketplace_paypal_ipn_variable_alter(&$value, $ipn, $variable_name) {
+  if (commerce_marketplace_paypal_wps_ipn_is_adaptive($ipn)) {
+    if ($variable_name == 'txn_id' && !empty($ipn['pay_key'])) {
+      $value = $ipn['pay_key'];
+    }
+    if ($variable_name == 'txn_id' && !empty($ipn['pay_key'])) {
+      $value = $ipn['pay_key'];
+    }
+    if ($variable_name == 'payment_status' && !empty($ipn['status'])) {
+      $value = $ipn['status'];
+    }
+    if ($variable_name == 'invoice') {
+      $value = NULL;
+    }
+  }
+}
+
+/**
+ * Implements hook_commerce_marketplace_paypal_ipn_orders().
+ *
+ * Loads orders based on information in $ipn['transaction'] array.
+ *
+ * @see commerce_marketplace_paypal_process_ipn()
+ */
+function commerce_marketplace_paypal_wps_commerce_marketplace_paypal_ipn_orders_alter(&$orders, $ipn) {
+  if (!empty($ipn['transaction']) && is_array($ipn['transaction'])) {
+    $order_ids = array();
+    foreach ($ipn['transaction'] as $transaction) {
+      if (!empty($transaction['invoice'])) {
+        if (strpos($transaction['invoice'], '-') !== FALSE) {
+          list($order_id, $timestamp) = explode('-', $transaction['invoice']);
+        }
+        else {
+          $order_id = $transaction['invoice'];
+        }
+        $order_ids[] = $order_id;
+      }
+    }
+    $orders = commerce_order_load_multiple($order_ids);
+  }
+}
+
+/**
+ * Implements hook_commerce_marketplace_paypal_ipn_save().
+ *
+ * Saves an IPN with some meta data related to local processing.
+ *
+ * @param $ipn
+ *   An IPN array with additional parameters for the order_id and Commerce
+ *   Payment transaction_id associated with the IPN.
+ *
+ * @return
+ *   The operation performed by drupal_write_record() on save; since the IPN is
+ *   received by reference, it will also contain the serial numeric ipn_id
+ *   used locally.
+ *
+ * @see commerce_marketplace_paypal_process_ipn()
+ * @see commerce_paypal_ipn_save()
+ */
+function commerce_marketplace_paypal_wps_commerce_marketplace_paypal_ipn_save($ipn) {
+  // PayPal Adaptive Payments IPNs have a different format than standard WPS
+  // IPNs, so we need to do a bit of moving stuff around.
+  if (commerce_marketplace_paypal_wps_ipn_is_adaptive($ipn)) {
+    // Adaptive Payment will be either parallel or chained. Parallel by default,
+    // changed to chained if there is one primary receiver defined.
+    $payment_type = 'parallel';
+
+    if (!empty($ipn['transaction'])) {
+      foreach ($ipn['transaction'] as $transaction) {
+        $transaction['ipn_id'] = $ipn['ipn_id'];
+        // PayPal sends back 'amount' value as something like 'EUR 14.99'.
+        list($transaction['currency'], $transaction['amount']) = explode(' ', $transaction['amount']);
+
+        drupal_write_record('commerce_marketplace_paypal_wps_adaptive_ipn', $transaction);
+
+        if (!empty($transaction['is_primary_receiver']) && $transaction['is_primary_receiver'] == 'true') {
+          $payment_type = 'chained';
+        }
+      }
+    }
+
+    // For Adaptive Payment the IPN structure and variable names are slightly
+    // different than for normal WPS - but we still want to save them in the
+    // same db table, so let's do a bit of rewriting.
+    $ipn['txn_id'] = $ipn['pay_key'];
+    $ipn['txn_type'] = $ipn['transaction_type'];
+    $ipn['payer_email'] = $ipn['sender_email'];
+    $ipn['payment_status'] = $ipn['status'];
+    $ipn['payment_type'] = $payment_type;
+
+    drupal_write_record('commerce_paypal_ipn', $ipn, 'ipn_id');
+  }
+  // This is not an Adaptive Payments IPN, but it still might apply to multiple
+  // orders, and multiple payment transactions - and if that's the case then
+  // we need to save their relationship in the database.
+  elseif (
+    variable_get('commerce_store_payment_mode', COMMERCE_MARKETPLACE_PAYMENT_DEFAULT_MODE) == 'main_store'
+    && !empty($ipn['transaction_ids'])
+    && is_array($ipn['transaction_ids'])
+    && count($ipn['transaction_ids']) > 1
+  ) {
+    foreach ($ipn['transaction_ids'] as $order_id => $transaction_id) {
+      $record = array(
+        'ipn_id' => $ipn['ipn_id'],
+        'order_id' => $order_id,
+        'transaction_id' => $transaction_id,
+      );
+      drupal_write_record('commerce_marketplace_paypal_ipn_transaction', $record);
+    }
+
+    // We already saved all the relationships between IPN and orders and payment
+    // transactions above, so now we actually should remove both order_id and
+    // transaction_id values from the main IPN table, as they could point to
+    // only one of actual values from there.
+    $ipn['order_id'] = NULL;
+    $ipn['transaction_id'] = NULL;
+    drupal_write_record('commerce_paypal_ipn', $ipn, 'ipn_id');
+  }
 }
