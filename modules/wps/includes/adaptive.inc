@@ -85,14 +85,15 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
   $group_orders = commerce_order_load_multiple(NULL, array('order_group' => $order->order_group), TRUE);
 
   // For chained payments.
-//  if ($payment_method['settings']['marketplace_adaptive']['payment_type'] == 'chained') {
-//    $receivers[] = array(
-//      'amount' => commerce_marketplace_order_calculate_total($group_orders),
-//      'invoiceId' => commerce_marketplace_paypal_ipn_invoice($group_orders),
-//      'email' => $payment_method['settings']['business'],
-//      'primary' => 'true',
-//    );
-//  }
+  if ($payment_method['settings']['marketplace_adaptive']['payment_type'] == 'chained') {
+    $total = commerce_marketplace_order_calculate_total($group_orders);
+    $receivers[] = array(
+      'amount' => commerce_currency_amount_to_decimal($total['amount'], $total['currency_code']),
+      'invoiceId' => commerce_marketplace_paypal_ipn_invoice($group_orders),
+      'email' => $payment_method['settings']['business'],
+      'primary' => 'true',
+    );
+  }
 
   foreach ($group_orders as $group_order) {
     $order_numbers[$group_order->order_id] = $group_order->order_number;
@@ -113,9 +114,9 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
     }
 
     // For chained payments.
-//    if ($payment_method['settings']['marketplace_adaptive']['payment_type'] == 'chained') {
-//      $receiver['primary'] = 'false';
-//    }
+    if ($payment_method['settings']['marketplace_adaptive']['payment_type'] == 'chained') {
+      $receiver['primary'] = 'false';
+    }
 
     $receivers[] = $receiver;
   }

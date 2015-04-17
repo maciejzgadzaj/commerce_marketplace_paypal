@@ -76,7 +76,7 @@ function commerce_marketplace_paypal_wps_form_rules_ui_edit_element_alter(&$form
       )),
       '#options' => array(
         'parallel' => t('parallel'),
-//        'chained' => t('chained'),
+        'chained' => t('chained'),
       ),
       '#default_value' => $settings['marketplace_adaptive']['payment_type'],
       '#required' => TRUE,
