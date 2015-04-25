@@ -132,8 +132,16 @@ function commerce_marketplace_paypal_process_ipn($payment_method = NULL, $debug_
     }
   }
 
+  if ($order_id = commerce_marketplace_paypal_ipn_get_variable($ipn, 'invoice')) {
+    // 'invoice' values should be in format '<order_id>-<REQUEST_TIME>'.
+    if (strpos($order_id, '-') !== FALSE) {
+      list($order_id, ) = explode('-', $order_id);
+    }
+    $ipn['order_id'] = $order_id;
+  }
+
   // Exit if the IPN has already been processed.
-  if (!empty($txn_id) && $prior_ipn = commerce_marketplace_paypal_ipn_load($txn_id)) {
+  if (!empty($txn_id) && $prior_ipn = commerce_marketplace_paypal_ipn_load($txn_id, $order_id)) {
     $current_status = commerce_marketplace_paypal_ipn_get_variable($ipn, 'payment_status');
     $prior_status = commerce_marketplace_paypal_ipn_get_variable($prior_ipn, 'payment_status');
 
@@ -143,14 +151,6 @@ function commerce_marketplace_paypal_process_ipn($payment_method = NULL, $debug_
       ), WATCHDOG_NOTICE);
       return FALSE;
     }
-  }
-
-  if ($order_id = commerce_marketplace_paypal_ipn_get_variable($ipn, 'invoice')) {
-    // 'invoice' values should be in format '<order_id>-<REQUEST_TIME>'.
-    if (strpos($order_id, '-') !== FALSE) {
-      list($order_id, ) = explode('-', $order_id);
-    }
-    $ipn['order_id'] = $order_id;
   }
 
   // Load the order(s) based on the IPN's invoice number.
@@ -322,8 +322,6 @@ function commerce_marketplace_paypal_ipn_get_variable($ipn, $variable_name) {
 function commerce_marketplace_paypal_ipn_get_orders($ipn) {
   $orders = array();
 
-
-
   if (!empty($ipn['invoice'])) {
     if (strpos($ipn['invoice'], '-') !== FALSE) {
       list($order_id, ) = explode('-', $ipn['invoice']);
@@ -363,14 +361,28 @@ function commerce_marketplace_paypal_ipn_get_orders($ipn) {
  * @return
  *   The original IPN with some meta data related to local processing.
  */
-function commerce_marketplace_paypal_ipn_load($value, $variable_name = 'txn_id') {
-  $ipn = db_select('commerce_paypal_ipn', 'i')
-    ->fields('i')
-    ->condition('i.' . $variable_name, $value)
-    // Allow other modules to alter this query.
-    ->addTag('commerce_marketplace_paypal_ipn_load')
-    ->execute()
-    ->fetchAssoc();
+function commerce_marketplace_paypal_ipn_load($txn_id, $order_id) {
+  $sql = "
+    SELECT
+      i.*, it.*,
+      CASE WHEN it.order_id IS NOT NULL THEN it.order_id ELSE i.order_id END AS order_id,
+      CASE WHEN it.transaction_id IS NOT NULL THEN it.transaction_id ELSE i.transaction_id END AS transaction_id
+    FROM
+      commerce_paypal_ipn i
+    LEFT JOIN
+      commerce_marketplace_paypal_ipn_transaction it ON (i.ipn_id = it.ipn_id)
+    WHERE 1
+      AND i.txn_id = :txn_id
+      AND (i.order_id = :order_id OR it.order_id = :order_id)
+  ";
+
+  $ipn = db_query($sql, array(
+    ':txn_id' => $txn_id,
+    ':order_id' => $order_id,
+  ))->fetchObject();
+
+  // Allow other modules to alter the IPN.
+  drupal_alter('commerce_marketplace_paypal_ipn_load', $ipn, $txn_id, $order_id);
 
   return $ipn;
 }

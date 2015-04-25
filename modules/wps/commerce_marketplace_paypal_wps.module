@@ -343,18 +343,13 @@ function commerce_marketplace_paypal_wps_paypal_ipn_process($order, $payment_met
   if (
     in_array($ipn['payment_status'], array('Voided', 'Completed'))
     && !empty($ipn['auth_id'])
-    && $auth_ipn = commerce_paypal_ipn_load($ipn['auth_id'])
+    && $auth_ipn = commerce_marketplace_paypal_ipn_load($ipn['auth_id'], $order->order_id)
   ) {
     // Load the prior IPN's transaction and update that with the capture values.
     // Marketplace-specific: we might have multiple payment transactions for
     // one IPN, so to load the correct transaction we first need to get its ID
     // from commerce_marketplace_paypal_wps_adaptive_ipn table based on order ID.
-    $conditions = array(
-      'ipn_id' => $auth_ipn['ipn_id'],
-      'order_id' => $order->order_id,
-    );
-    $relationship = commerce_marketplace_paypal_wps_adaptive_ipn_load($conditions);
-    $transaction = commerce_payment_transaction_load($relationship['transaction_id']);
+    $transaction = commerce_payment_transaction_load($auth_ipn['transaction_id']);
   }
   else {
     // Create a new payment transaction for the order.
@@ -610,12 +605,7 @@ function commerce_marketplace_paypal_wps_commerce_marketplace_paypal_ipn_save($i
   // This is not an Adaptive Payments IPN, but it still might apply to multiple
   // orders, and multiple payment transactions - and if that's the case then
   // we need to save their relationship in the database.
-  elseif (
-    variable_get('commerce_store_payment_mode', COMMERCE_MARKETPLACE_PAYMENT_DEFAULT_MODE) == 'main_store'
-    && !empty($ipn['transaction_ids'])
-    && is_array($ipn['transaction_ids'])
-    && count($ipn['transaction_ids']) > 1
-  ) {
+  else {
     foreach ($ipn['transaction_ids'] as $order_id => $transaction_id) {
       $record = array(
         'ipn_id' => $ipn['ipn_id'],
@@ -629,8 +619,52 @@ function commerce_marketplace_paypal_wps_commerce_marketplace_paypal_ipn_save($i
     // transactions above, so now we actually should remove both order_id and
     // transaction_id values from the main IPN table, as they could point to
     // only one of actual values from there.
-    $ipn['order_id'] = NULL;
-    $ipn['transaction_id'] = NULL;
-    drupal_write_record('commerce_paypal_ipn', $ipn, 'ipn_id');
+    if (
+      variable_get('commerce_store_payment_mode', COMMERCE_MARKETPLACE_PAYMENT_DEFAULT_MODE) == 'main_store'
+      && !empty($ipn['transaction_ids'])
+      && is_array($ipn['transaction_ids'])
+      && count($ipn['transaction_ids']) > 1
+    ) {
+      $ipn['order_id'] = NULL;
+      $ipn['transaction_id'] = NULL;
+      drupal_write_record('commerce_paypal_ipn', $ipn, 'ipn_id');
+    }
   }
+}
+
+/**
+ * Implements hook_commerce_marketplace_paypal_ipn_load_alter().
+ *
+ * Loads the Adaptive Payments IPN.
+ *
+ * @see commerce_marketplace_paypal_ipn_load()
+ */
+function commerce_marketplace_paypal_wps_commerce_marketplace_paypal_ipn_load_alter(&$ipn, $txn_id, $order_id) {
+  // If $ipn is not empty, it means that IPN was successfully loaded in
+  // commerce_marketplace_paypal_ipn_load(), which means that it was not
+  // Adaptive Payments IPN (even though its txn_id value could have been
+  // found, the order_id couldn't, as for Adaptive IPNs their order_id
+  // value is saved in commerce_marketplace_paypal_wps_adaptive_ipn table.
+  if (!empty($ipn)) {
+    return;
+  }
+
+  $sql = "
+    SELECT
+      i.*, ai.*,
+      CASE WHEN ai.order_id IS NOT NULL THEN ai.order_id ELSE i.order_id END AS order_id,
+      CASE WHEN ai.transaction_id IS NOT NULL THEN ai.transaction_id ELSE i.transaction_id END AS transaction_id
+    FROM
+      commerce_paypal_ipn i
+    LEFT JOIN
+      commerce_marketplace_paypal_wps_adaptive_ipn ai ON (i.ipn_id = ai.ipn_id)
+    WHERE 1
+      AND i.txn_id = :txn_id
+      AND (i.order_id = :order_id OR ai.order_id = :order_id)
+  ";
+
+  $ipn = db_query($sql, array(
+    ':txn_id' => $txn_id,
+    ':order_id' => $order_id,
+  ))->fetchObject();
 }

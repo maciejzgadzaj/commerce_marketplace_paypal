@@ -304,18 +304,13 @@ function commerce_marketplace_paypal_wps_adaptive_paypal_ipn_process($order, $pa
   if (
     in_array($ipn_transaction['status'], array('Voided', 'Completed'), TRUE)
     && !empty($ipn['auth_id'])
-    && $auth_ipn = commerce_paypal_ipn_load($ipn['auth_id'])
+    && $auth_ipn = commerce_marketplace_paypal_ipn_load($ipn['auth_id'], $order->order_id)
   ) {
     // Load the prior IPN's transaction and update that with the capture values.
     // Marketplace-specific: we might have multiple payment transactions for
     // one IPN, so to load the correct transaction we first need to get its ID
     // from commerce_marketplace_paypal_wps_adaptive_ipn table based on order ID.
-    $conditions = array(
-      'ipn_id' => $auth_ipn['ipn_id'],
-      'order_id' => $order->order_id,
-    );
-    $relationship = commerce_marketplace_paypal_wps_adaptive_ipn_load($conditions);
-    $transaction = commerce_payment_transaction_load($relationship['transaction_id']);
+    $transaction = commerce_payment_transaction_load($auth_ipn['transaction_id']);
   }
   else {
     // Create a new payment transaction for the order.
@@ -383,25 +378,4 @@ function commerce_marketplace_paypal_wps_adaptive_paypal_ipn_process($order, $pa
     '@order_number' => $order->order_number,
     '@txn_id' => $ipn_transaction['id_for_sender_txn'],
   ), WATCHDOG_INFO);
-}
-
-/**
- * Loads the relationship between IPN and payment transaction.
- *
- * @param array $conditions
- *   An array of condition to use for loading the relationship.
- *
- * @return array|null
- *   A relationship as an array or NULL if nothing was found.
- *
- * @see commerce_marketplace_paypal_wps_adaptive_ipn_save()
- */
-function commerce_marketplace_paypal_wps_adaptive_ipn_load($conditions) {
-  $query = db_select('commerce_marketplace_paypal_wps_adaptive_ipn', 'ai')
-    ->fields('ai');
-  foreach ($conditions as $key => $value) {
-    $query->condition('ai.' . $key, $value);
-  }
-  return $query->execute()
-    ->fetchAssoc();
 }
