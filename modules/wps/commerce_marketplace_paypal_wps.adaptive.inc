@@ -67,6 +67,7 @@ function commerce_marketplace_paypal_wps_adaptive_default_settings() {
       'payment_type' => 'parallel',
       'fees_payer' => 'EACHRECEIVER',
       'reverse_all_parallel_payments_on_error' => 'true',
+      'max_orders_message' => 'You cannot order from more than @limit stores at once when using this payment method. Please adjust your cart or select a different payment method.',
     ),
   );
 }
@@ -121,6 +122,15 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
     }
 
     $receivers[] = $receiver;
+  }
+
+  // Maximum number of receivers for PayPal Adaptive Payments is 10
+  // (in case of chained payments, that's 9 secondary receivers + 1 primary).
+  if (count($receivers) > COMMERCE_MARKETPLACE_PAYPAL_WPS_ADAPTIVE_MAX_RECEIVERS) {
+    drupal_set_message(t($payment_method['settings']['marketplace_adaptive']['max_orders_message'], array(
+      '@limit' => ($payment_method['settings']['marketplace_adaptive']['payment_type'] == 'parallel') ? COMMERCE_MARKETPLACE_PAYPAL_WPS_ADAPTIVE_MAX_RECEIVERS : COMMERCE_MARKETPLACE_PAYPAL_WPS_ADAPTIVE_MAX_RECEIVERS - 1,
+    )), 'error');
+    return FALSE;
   }
 
   // Build the PAY request.
@@ -200,13 +210,13 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
   // Log any errors to the watchdog.
   if ($error = curl_error($ch)) {
     watchdog('commerce_marketplace_paypal_wps', 'Adaptive Payments: cURL error: @error', array('@error' => $error), WATCHDOG_ERROR);
+    drupal_set_message(t('There was an error processing your payment with PayPal. Please try again or contact us if the problem persists.'), 'error');
     return FALSE;
   }
   curl_close($ch);
 
   // Decode JSON response.
   $result = json_decode($result);
-//  dpm($result, '$result');
 
   // Log the response if logging is enabled.
   if (!empty($payment_method['settings']['api_logging']['response'])) {
@@ -240,6 +250,7 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
       '@order_number' => $order->order_number,
       '!response' => '<pre>'. check_plain(print_r($result, TRUE)) .'</pre>'
     ), WATCHDOG_ERROR);
+    drupal_set_message(t('There was an error processing your payment with PayPal. Please try again or contact us if the problem persists.'), 'error');
     return FALSE;
   }
 }

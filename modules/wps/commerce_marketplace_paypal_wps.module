@@ -5,6 +5,11 @@
  */
 
 /**
+ * Maximum number of receivers for PayPal Adaptive Payments.
+ */
+define('COMMERCE_MARKETPLACE_PAYPAL_WPS_ADAPTIVE_MAX_RECEIVERS', 10);
+
+/**
  * PayPal Adaptive Payments-specific features.
  */
 include_once 'commerce_marketplace_paypal_wps.adaptive.inc';
@@ -144,6 +149,17 @@ function commerce_marketplace_paypal_wps_form_rules_ui_edit_element_alter(&$form
       '#default_value' => $settings['marketplace_adaptive']['reverse_all_parallel_payments_on_error'],
     );
 
+    $subform['max_orders_message'] = array(
+      '#type' => 'textarea',
+      '#title' => t('Cart limit message'),
+      '#description' => t('Maximum number of receivers for Adaptive Payments is @max_parallel (@max_chained secondary receivers for chained payments), therefore when using Adaptive Payments during the checkout process, the number of orders cannot be higher than number of possible receivers. This message will be displayed to a customer trying to checkout with more orders than allowed. You can use the <code>@limit</code> token to include max number of orders in the message.', array(
+        '@max_parallel' => COMMERCE_MARKETPLACE_PAYPAL_WPS_ADAPTIVE_MAX_RECEIVERS,
+        '@max_chained' => COMMERCE_MARKETPLACE_PAYPAL_WPS_ADAPTIVE_MAX_RECEIVERS - 1,
+      )),
+      '#default_value' => $settings['marketplace_adaptive']['max_orders_message'],
+      '#rows' => 2,
+    );
+
     // Add info on 'Payment action' element about missing support
     // for Authorization action when using PayPal Adaptive Payments.
     $form['parameter']['payment_method']['settings']['payment_method']['settings']['payment_action']['#description'] = t('Note that <em>Authorization</em> action is not (yet) supported by <em>Commerce Marketplace PayPal</em> for using with parallel payments.');
@@ -204,7 +220,6 @@ function commerce_marketplace_paypal_wps_form_commerce_paypal_wps_redirect_form_
       foreach ($group_orders as $group_order) {
         commerce_payment_redirect_pane_previous_page($group_order, t('Failed to retrieve PayPal Adaptive Payments pay key.'));
       }
-      drupal_set_message(t('There was an error processing your payment with PayPal. Please try again or contact us if the problem persists.'), 'error');
       drupal_goto(commerce_checkout_order_uri($order));
     }
 
