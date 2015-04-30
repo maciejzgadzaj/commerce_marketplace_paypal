@@ -68,6 +68,8 @@ function commerce_marketplace_paypal_wps_adaptive_default_settings() {
       'fees_payer' => 'EACHRECEIVER',
       'reverse_all_parallel_payments_on_error' => 'true',
       'max_orders_message' => 'You cannot order from more than @limit stores at once when using this payment method. Please adjust your cart or select a different payment method.',
+      'marketplace_fee' => 0,
+      'marketplace_fee_rounding_mode' => COMMERCE_ROUND_HALF_DOWN,
     ),
   );
 }
@@ -87,25 +89,45 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
   $order_numbers = $receivers = array();
   $group_orders = commerce_order_load_multiple(NULL, array('order_group' => $order->order_group), TRUE);
 
+  $receivers = array();
+
   // For chained payments.
   if ($payment_method['settings']['marketplace_adaptive']['payment_type'] == 'chained') {
     $total = commerce_marketplace_order_calculate_total($group_orders);
-    $receivers[] = array(
+    $receivers[0] = array(
       'amount' => commerce_currency_amount_to_decimal($total['amount'], $total['currency_code']),
-      'invoiceId' => commerce_marketplace_paypal_ipn_invoice($group_orders),
+      'invoiceId' => COMMERCE_MARKETPLACE_PAYPAL_WPS_INVOICE_PREFIX_MARKETPLACE . '-' . commerce_marketplace_paypal_ipn_invoice($group_orders),
       'email' => $payment_method['settings']['business'],
       'primary' => 'true',
     );
   }
+
+  $total_fee_amount = 0;
 
   foreach ($group_orders as $group_order) {
     $order_numbers[$group_order->order_id] = $group_order->order_number;
 
     $group_order_wrapper = entity_metadata_wrapper('commerce_order', $group_order);
 
+    // Add the used payment type in the order (parallel/chained).
+    $group_order->data['commerce_marketplace_paypal_wps']['payment_type'] = $payment_method['settings']['marketplace_adaptive']['payment_type'];
+
+    $amount = $group_order_wrapper->commerce_order_total->amount->value();
+    if (!empty($payment_method['settings']['marketplace_adaptive']['marketplace_fee'])) {
+      $order_fee_amount = $amount * ($payment_method['settings']['marketplace_adaptive']['marketplace_fee'] / 100);
+      $order_fee_amount = commerce_round($payment_method['settings']['marketplace_adaptive']['marketplace_fee_rounding_mode'], $order_fee_amount);
+
+      $amount -= $order_fee_amount;
+      $total_fee_amount += $order_fee_amount;
+
+      // We will need marketplace fee amount for each order for IPN processing.
+      $group_order->data['commerce_marketplace_paypal_wps']['marketplace_fee'] = $order_fee_amount;
+    }
+    commerce_order_save($group_order);
+
     $receiver = array(
-      'amount' => commerce_currency_amount_to_decimal($group_order_wrapper->commerce_order_total->amount->value(), $group_order_wrapper->commerce_order_total->currency_code->value()),
-      'invoiceId' => commerce_paypal_ipn_invoice($group_order),
+      'amount' => commerce_currency_amount_to_decimal($amount, $group_order_wrapper->commerce_order_total->currency_code->value()),
+      'invoiceId' => COMMERCE_MARKETPLACE_PAYPAL_WPS_INVOICE_PREFIX_VENDOR . '-' . commerce_paypal_ipn_invoice($group_order),
     );
 
     if ($store = $group_order_wrapper->commerce_store->value()) {
@@ -122,6 +144,23 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
     }
 
     $receivers[] = $receiver;
+  }
+
+  // Add marketplace fees to receivers array.
+  if ($total_fee_amount > 0) {
+    $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+    // For parallel payments.
+    if ($payment_method['settings']['marketplace_adaptive']['payment_type'] == 'parallel') {
+      $receivers[] = array(
+        'amount' => commerce_currency_amount_to_decimal($total_fee_amount, $order_wrapper->commerce_order_total->currency_code->value()),
+        'invoiceId' => COMMERCE_MARKETPLACE_PAYPAL_WPS_INVOICE_PREFIX_FEE . '-' . commerce_marketplace_paypal_ipn_invoice($group_orders),
+        'email' => $payment_method['settings']['business'],
+      );
+    }
+    // For chained payments.
+    else {
+      $receivers[0]['invoiceId'] = COMMERCE_MARKETPLACE_PAYPAL_WPS_INVOICE_PREFIX_FEE . $receivers[0]['invoiceId'];
+    }
   }
 
   // Maximum number of receivers for PayPal Adaptive Payments is 10
@@ -283,14 +322,27 @@ function commerce_marketplace_paypal_wps_ipn_is_adaptive($ipn) {
  * @see commerce_paypal_wps_paypal_ipn_process()
  */
 function commerce_marketplace_paypal_wps_adaptive_paypal_ipn_process($order, $payment_method, &$ipn) {
-  foreach ($ipn['transaction'] as $delta => $transaction) {
-    list($order_id, $timestamp) = explode('-', $transaction['invoice']);
-    if ($order_id == $order->order_id) {
-      $ipn_transaction_delta = $delta;
-      $ipn_transaction = $transaction;
+  foreach ($ipn['transaction'] as &$transaction) {
+    $order_ids = explode('-', $transaction['invoice'], -1);
+    if (!empty($order_ids)) {
+      foreach ($order_ids as $order_id) {
+        if (is_numeric($order_id) && $order_id == $order->order_id) {
+          commerce_marketplace_paypal_wps_adaptive_paypal_ipn_process_transaction($transaction, $order, $payment_method, $ipn);
+        }
+      }
     }
   }
+}
 
+/**
+ * Payment method callback: process an IPN once it's been validated.
+ *
+ * Overrides commerce_paypal_wps_paypal_ipn_process()
+ *
+ * @see commerce_marketplace_paypal_wps_paypal_ipn_process()
+ * @see commerce_paypal_wps_paypal_ipn_process()
+ */
+function commerce_marketplace_paypal_wps_adaptive_paypal_ipn_process_transaction(&$ipn_transaction, $order, $payment_method, &$ipn) {
   // Do not perform any processing on WPS transactions here that do not have
   // transaction IDs, indicating they are non-payment IPNs such as those used
   // for subscription signup requests.
@@ -305,6 +357,17 @@ function commerce_marketplace_paypal_wps_adaptive_paypal_ipn_process($order, $pa
   ) {
     commerce_payment_redirect_pane_previous_page($order);
     return FALSE;
+  }
+
+  // For chained payments, when processing a transaction for primary receiver,
+  // if such transaction does not include marketplace fees (so there is no 'F'
+  // prefix in the 'invoice' value), we do not want to create any payment
+  // transaction in Drupal (as then the order balance would go crazy).
+  if (
+    $ipn_transaction['is_primary_receiver'] == 'true'
+    && strpos($ipn_transaction['invoice'], COMMERCE_MARKETPLACE_PAYPAL_WPS_INVOICE_PREFIX_FEE) === FALSE
+  ) {
+    return;
   }
 
   // If this is a prior authorization capture IPN for which we've already
@@ -330,19 +393,18 @@ function commerce_marketplace_paypal_wps_adaptive_paypal_ipn_process($order, $pa
   }
 
   $transaction->remote_id = $ipn_transaction['id_for_sender_txn'];
+
   // Amounts are sent back as 'EUR 149.99'.
   list($currency, $amount) = explode(' ', $ipn_transaction['amount']);
   $transaction->amount = commerce_currency_decimal_to_amount($amount, $currency);
   $transaction->currency_code = $currency;
   $transaction->payload[REQUEST_TIME . '-ipn'] = $ipn;
 
-  // Marketplace-specific: if we are processing multiple orders from one order
-  // group, the amount returned by an IPN will be equal to sum of total amount
-  // of all those orders. But the local payment transaction amounts should match
-  // each order total, so it needs to be updated here.
-  $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
-  if ($transaction->amount > $order_wrapper->commerce_order_total->amount->value()) {
-    $transaction->amount = $order_wrapper->commerce_order_total->amount->value();
+  if (
+    strpos($ipn_transaction['invoice'], COMMERCE_MARKETPLACE_PAYPAL_WPS_INVOICE_PREFIX_FEE) === 0
+    && !empty($order->data['commerce_marketplace_paypal_wps']['marketplace_fee'])
+  ) {
+    $transaction->amount = $order->data['commerce_marketplace_paypal_wps']['marketplace_fee'];
   }
 
   // Set the transaction's statuses based on the IPN's payment_status.
@@ -376,15 +438,21 @@ function commerce_marketplace_paypal_wps_adaptive_paypal_ipn_process($order, $pa
       break;
   }
 
+  $transaction->message .= '<br />' . t('Receiver: @receiver_email', array(
+    '@receiver_email' => $ipn_transaction['receiver'],
+  ));
+
   // Save the transaction information.
   commerce_payment_transaction_save($transaction);
+
   // Add order_id and transaction_id to the IPN's transaction subarray so that
   // we can save it in commerce_marketplace_paypal_wps_adaptive_ipn table in
   // commerce_marketplace_paypal_wps_commerce_marketplace_paypal_ipn_save().
-  $ipn['transaction'][$ipn_transaction_delta]['order_id'] = $order->order_id;
-  $ipn['transaction'][$ipn_transaction_delta]['transaction_id'] = $transaction->transaction_id;
+  $ipn_transaction['order_id'] = $order->order_id;
+  $ipn_transaction['transaction_id'] = $transaction->transaction_id;
 
   commerce_payment_redirect_pane_next_page($order);
+
   watchdog('commerce_marketplace_paypal_wps', 'Adaptive Payments: IPN processed for order @order_number with ID @txn_id.', array(
     '@order_number' => $order->order_number,
     '@txn_id' => $ipn_transaction['id_for_sender_txn'],

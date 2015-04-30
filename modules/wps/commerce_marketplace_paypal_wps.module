@@ -10,6 +10,19 @@
 define('COMMERCE_MARKETPLACE_PAYPAL_WPS_ADAPTIVE_MAX_RECEIVERS', 10);
 
 /**
+ * When sending a payment request to PayPal Adaptive Payments, we will add
+ * a prefix to each invoice number for each receiver to know whether each
+ * transaction was sent to the marketplace (M) or to a vendor (V). Also,
+ * additional prefix F will be used for 'marketplace fee' transactions
+ * sent to the marketplace. (In case of chained payments, where marketplace
+ * always is the primary receiver, if such transaction includes marketplace
+ * fees as well, t will be prefixed with FM).
+ */
+define('COMMERCE_MARKETPLACE_PAYPAL_WPS_INVOICE_PREFIX_MARKETPLACE', 'M');
+define('COMMERCE_MARKETPLACE_PAYPAL_WPS_INVOICE_PREFIX_VENDOR', 'V');
+define('COMMERCE_MARKETPLACE_PAYPAL_WPS_INVOICE_PREFIX_FEE', 'F');
+
+/**
  * PayPal Adaptive Payments-specific features.
  */
 include_once 'commerce_marketplace_paypal_wps.adaptive.inc';
@@ -59,11 +72,14 @@ function commerce_marketplace_paypal_wps_form_rules_ui_edit_element_alter(&$form
     );
 
     // Settings specific to PayPal Adaptive Payments.
-    $description = t('For more information on obtaining the following details, see the <a href="@sandbox_doc_url">PayPal Sandbox</a> documentation, <a href="@sandbox_url">Getting Your API Test Credentials</a> and <a href="@live_url">Obtaining your live PayPal credentials</a>.', array(
+    $description = '<p>' . t('PayPal Adaptive Payments will be used when <a href="@payments_url">payments are configured to be sent directly to merchants</a>, and all related merchants (stores) have <em>PayPal WPS</em> payment method enabled and configured.', array(
+      '@payments_url' => url('admin/commerce/marketplace/payment'),
+    )) . '</p>';
+    $description .= '<p>' . t('For more information on obtaining the following details, see the <a href="@sandbox_doc_url">PayPal Sandbox</a> documentation, <a href="@sandbox_url">Getting Your API Test Credentials</a> and <a href="@live_url">Obtaining your live PayPal credentials</a>.', array(
       '@sandbox_doc_url' => url('https://developer.paypal.com/docs/classic/lifecycle/ug_sandbox/'),
       '@sandbox_url' => url('https://developer.paypal.com/docs/classic/lifecycle/sb_credentials/'),
       '@live_url' => url('https://developer.paypal.com/docs/classic/lifecycle/goingLive/#credentials'),
-    ));
+    )) . '</p>';
     $form['parameter']['payment_method']['settings']['payment_method']['settings']['marketplace_adaptive'] = array(
       '#type' => 'fieldset',
       '#title' => t('Marketplace Adaptive Payments settings'),
@@ -158,6 +174,28 @@ function commerce_marketplace_paypal_wps_form_rules_ui_edit_element_alter(&$form
       )),
       '#default_value' => $settings['marketplace_adaptive']['max_orders_message'],
       '#rows' => 2,
+    );
+
+    $subform['marketplace_fee'] = array(
+      '#type' => 'textfield',
+      '#title' => t('Marketplace fee'),
+      '#description' => t('Marketplace transaction fee associated with each payment to final receiver, expressed as percentage of amount of each transaction. Enter <em>0</em> for no fee to be collected.')
+        . '<br />' . t('If a non-zero value is provided, the relevant percentage will be deducted from transactions sent to final receivers. Additionally, for <em>parallel</em> payments, a new transaction will be created transferring deducted amount to the main Marketplace PayPal account.'),
+      '#size' => 5,
+      '#field_suffix' => '%',
+      '#default_value' => $settings['marketplace_adaptive']['marketplace_fee'],
+    );
+
+    $subform['marketplace_fee_rounding_mode'] = array(
+      '#type' => 'select',
+      '#title' => t('Marketplace fee rounding mode'),
+      '#options' => commerce_round_mode_options_list(),
+      '#default_value' => $settings['marketplace_adaptive']['marketplace_fee_rounding_mode'],
+      '#states' => array(
+        'visible' => array(
+          ':input[name="parameter[payment_method][settings][payment_method][settings][marketplace_adaptive][marketplace_fee]"]' => array('!value' => 0),
+        ),
+      ),
     );
 
     // Add info on 'Payment action' element about missing support
@@ -268,7 +306,8 @@ function commerce_marketplace_paypal_wps_paypal_ipn_validate($order, $payment_me
   // Get the payment receiver's email from the Adaptive Payments IPN.
   elseif (!empty($ipn['transaction']) && is_array($ipn['transaction'])) {
     foreach ($ipn['transaction'] as $transaction) {
-      list($order_id, ) = explode('-', $transaction['invoice']);
+      // 'invoice' values should be in format '<code>-<order_id>-<REQUEST_TIME>'.
+      list(, $order_id, ) = explode('-', $transaction['invoice']);
       if ($order_id == $order->order_id && !empty($transaction['receiver'])) {
         $ipn_receiver_email = $transaction['receiver'];
       }
@@ -280,9 +319,9 @@ function commerce_marketplace_paypal_wps_paypal_ipn_validate($order, $payment_me
   // payment method instance.
   if (!in_array($ipn_receiver_email, $defined_receiver_emails)) {
     commerce_payment_redirect_pane_previous_page($order);
-    watchdog('commerce_paypal_wps', 'IPN rejected for order @order_number: invalid receiver e-mail specified (@receiver_email); must match one of the e-mail addresses on the PayPal account. (@receiver_emails)', array(
+    watchdog('commerce_paypal_wps', 'IPN rejected for order @order_number: invalid receiver e-mail specified (@receiver_email); must match one of the e-mail addresses on the PayPal account (@receiver_emails).', array(
       '@order_number' => $order->order_number,
-      '@receiver_email' => $ipn['receiver_email'],
+      '@receiver_email' => $ipn_receiver_email,
       '@receiver_emails' => implode(', ', $defined_receiver_emails),
     ), WATCHDOG_NOTICE);
     return FALSE;
@@ -500,7 +539,10 @@ function commerce_marketplace_paypal_wps_receiver_emails($order, $payment_method
 
   if (
     variable_get('commerce_store_payment_mode', COMMERCE_MARKETPLACE_PAYMENT_DEFAULT_MODE) == 'merchants'
-    && $payment_method['settings']['marketplace_adaptive']['payment_type'] == 'chained'
+    && (
+      $payment_method['settings']['marketplace_adaptive']['payment_type'] == 'chained'
+      || !empty($payment_method['settings']['marketplace_adaptive']['marketplace_fee'])
+    )
     || variable_get('commerce_store_payment_mode', COMMERCE_MARKETPLACE_PAYMENT_DEFAULT_MODE) != 'merchants'
   ) {
     if (!empty($payment_method['settings']['receiver_emails'])) {
@@ -555,12 +597,17 @@ function commerce_marketplace_paypal_wps_commerce_marketplace_paypal_ipn_orders_
     foreach ($ipn['transaction'] as $transaction) {
       if (!empty($transaction['invoice'])) {
         if (strpos($transaction['invoice'], '-') !== FALSE) {
-          list($order_id, $timestamp) = explode('-', $transaction['invoice']);
+          // 'invoice' values should be in format '<code>-<order_id>-<REQUEST_TIME>'.
+          // We get rid of timestamp using explode()...
+          $invoice_order_ids = explode('-', $transaction['invoice'], -1);
+          // ...and then remove the code from the beginning.
+          array_shift($invoice_order_ids);
+          // Here we should be left with an array of order IDs only.
+          $order_ids = array_merge($order_ids, $invoice_order_ids);
         }
         else {
-          $order_id = $transaction['invoice'];
+          $order_ids[] = $transaction['invoice'];
         }
-        $order_ids[] = $order_id;
       }
     }
     $orders = commerce_order_load_multiple($order_ids);

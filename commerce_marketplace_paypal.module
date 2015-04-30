@@ -133,9 +133,9 @@ function commerce_marketplace_paypal_process_ipn($payment_method = NULL, $debug_
   }
 
   if ($order_id = commerce_marketplace_paypal_ipn_get_variable($ipn, 'invoice')) {
-    // 'invoice' values should be in format '<order_id>-<REQUEST_TIME>'.
+    // 'invoice' values should be in format '<code>-<order_id>-<REQUEST_TIME>'.
     if (strpos($order_id, '-') !== FALSE) {
-      list($order_id, ) = explode('-', $order_id);
+      list(, $order_id, ) = explode('-', $order_id);
     }
     $ipn['order_id'] = $order_id;
   }
@@ -323,8 +323,9 @@ function commerce_marketplace_paypal_ipn_get_orders($ipn) {
   $orders = array();
 
   if (!empty($ipn['invoice'])) {
+    // 'invoice' values should be in format '<code>-<order_id>-<REQUEST_TIME>'.
     if (strpos($ipn['invoice'], '-') !== FALSE) {
-      list($order_id, ) = explode('-', $ipn['invoice']);
+      list(, $order_id, ) = explode('-', $ipn['invoice']);
     }
     else {
       $order_id = $ipn['invoice'];
