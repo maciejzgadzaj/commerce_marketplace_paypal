@@ -95,7 +95,7 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
   if ($payment_method['settings']['marketplace_adaptive']['payment_type'] == 'chained') {
     $total = commerce_marketplace_order_calculate_total($group_orders);
     $receivers[0] = array(
-      'amount' => commerce_currency_amount_to_decimal($total['amount'], $total['currency_code']),
+      'amount' => commerce_paypal_price_amount($total['amount'], $total['currency_code']),
       'invoiceId' => COMMERCE_MARKETPLACE_PAYPAL_WPS_INVOICE_PREFIX_MARKETPLACE . '-' . commerce_marketplace_paypal_ipn_invoice($group_orders),
       'email' => $payment_method['settings']['business'],
       'primary' => 'true',
@@ -126,7 +126,7 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
     commerce_order_save($group_order);
 
     $receiver = array(
-      'amount' => commerce_currency_amount_to_decimal($amount, $group_order_wrapper->commerce_order_total->currency_code->value()),
+      'amount' => commerce_paypal_price_amount($amount, $group_order_wrapper->commerce_order_total->currency_code->value()),
       'invoiceId' => COMMERCE_MARKETPLACE_PAYPAL_WPS_INVOICE_PREFIX_VENDOR . '-' . commerce_paypal_ipn_invoice($group_order),
     );
 
@@ -152,7 +152,7 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
     // For parallel payments.
     if ($payment_method['settings']['marketplace_adaptive']['payment_type'] == 'parallel') {
       $receivers[] = array(
-        'amount' => commerce_currency_amount_to_decimal($total_fee_amount, $order_wrapper->commerce_order_total->currency_code->value()),
+        'amount' => commerce_paypal_price_amount($total_fee_amount, $order_wrapper->commerce_order_total->currency_code->value()),
         'invoiceId' => COMMERCE_MARKETPLACE_PAYPAL_WPS_INVOICE_PREFIX_FEE . '-' . commerce_marketplace_paypal_ipn_invoice($group_orders),
         'email' => $payment_method['settings']['business'],
       );
