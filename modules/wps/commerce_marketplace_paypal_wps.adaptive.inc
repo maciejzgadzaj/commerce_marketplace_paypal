@@ -89,13 +89,29 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
   $order_numbers = $receivers = array();
   $group_orders = commerce_order_load_multiple(NULL, array('order_group' => $order->order_group), TRUE);
 
+  // Determine the currency code to use to actually process the transaction,
+  // which will either be the default currency code or the currency code of
+  // the orders total if it's supported by PayPal if that option is enabled.
+  $currency_code = $payment_method['settings']['currency_code'];
+
+  // Order total will either use the currency that is common for all orders,
+  // or site's default currency if it's in one of the orders, or the first
+  // currency on the first order.
+  $total = commerce_marketplace_order_calculate_total($group_orders, $currency_code);
+  if (
+    $total['currency_code'] != $currency_code
+    && !empty($payment_method['settings']['allow_supported_currencies'])
+    && in_array($total['currency_code'], array_keys(commerce_paypal_currencies('paypal_wps')))
+  ) {
+    $currency_code = $total['currency_code'];
+  }
+
   $receivers = array();
 
   // For chained payments.
   if ($payment_method['settings']['marketplace_adaptive']['payment_type'] == 'chained') {
-    $total = commerce_marketplace_order_calculate_total($group_orders);
     $receivers[0] = array(
-      'amount' => commerce_paypal_price_amount($total['amount'], $total['currency_code']),
+      'amount' => commerce_paypal_price_amount(commerce_currency_convert($total['amount'], $total['currency_code'], $currency_code), $currency_code),
       'invoiceId' => COMMERCE_MARKETPLACE_PAYPAL_WPS_INVOICE_PREFIX_MARKETPLACE . '-' . commerce_marketplace_paypal_ipn_invoice($group_orders),
       'email' => $payment_method['settings']['business'],
       'primary' => 'true',
@@ -109,24 +125,33 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
 
     $group_order_wrapper = entity_metadata_wrapper('commerce_order', $group_order);
 
-    // Add the used payment type in the order (parallel/chained).
+    // Add the used payment type to the order (parallel/chained).
     $group_order->data['commerce_marketplace_paypal_wps']['payment_type'] = $payment_method['settings']['marketplace_adaptive']['payment_type'];
 
-    $amount = $group_order_wrapper->commerce_order_total->amount->value();
-    if (!empty($payment_method['settings']['marketplace_adaptive']['marketplace_fee'])) {
-      $order_fee_amount = $amount * ($payment_method['settings']['marketplace_adaptive']['marketplace_fee'] / 100);
-      $order_fee_amount = commerce_round($payment_method['settings']['marketplace_adaptive']['marketplace_fee_rounding_mode'], $order_fee_amount);
+    // Get initial transaction amount and currency code from the order.
+    $order_amount = $group_order_wrapper->commerce_order_total->amount->value();
+    $order_currency_code = $group_order_wrapper->commerce_order_total->currency_code->value();
 
-      $amount -= $order_fee_amount;
+    // Let's calculate marketplace fee amount from order's original amount,
+    // before converting it to the PayPal transaction amount.
+    if (!empty($payment_method['settings']['marketplace_adaptive']['marketplace_fee'])) {
+      $order_fee_amount = $order_amount * ($payment_method['settings']['marketplace_adaptive']['marketplace_fee'] / 100);
+      $order_fee_amount = commerce_round($payment_method['settings']['marketplace_adaptive']['marketplace_fee_rounding_mode'], $order_fee_amount);
+      $order_amount -= $order_fee_amount;
+
+      $order_fee_amount = commerce_currency_convert($order_fee_amount, $order_currency_code, $currency_code);
       $total_fee_amount += $order_fee_amount;
 
       // We will need marketplace fee amount for each order for IPN processing.
-      $group_order->data['commerce_marketplace_paypal_wps']['marketplace_fee'] = $order_fee_amount;
+      $group_order->data['commerce_marketplace_paypal_wps']['marketplace_fee'] = array(
+        'amount' => $order_fee_amount,
+        'currency_code' => $currency_code,
+      );
     }
     commerce_order_save($group_order);
 
     $receiver = array(
-      'amount' => commerce_paypal_price_amount($amount, $group_order_wrapper->commerce_order_total->currency_code->value()),
+      'amount' => commerce_paypal_price_amount(commerce_currency_convert($order_amount, $order_currency_code, $currency_code), $currency_code),
       'invoiceId' => COMMERCE_MARKETPLACE_PAYPAL_WPS_INVOICE_PREFIX_VENDOR . '-' . commerce_paypal_ipn_invoice($group_order),
     );
 
@@ -148,11 +173,10 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
 
   // Add marketplace fees to receivers array.
   if ($total_fee_amount > 0) {
-    $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
     // For parallel payments.
     if ($payment_method['settings']['marketplace_adaptive']['payment_type'] == 'parallel') {
       $receivers[] = array(
-        'amount' => commerce_paypal_price_amount($total_fee_amount, $order_wrapper->commerce_order_total->currency_code->value()),
+        'amount' => commerce_paypal_price_amount($total_fee_amount, $currency_code),
         'invoiceId' => COMMERCE_MARKETPLACE_PAYPAL_WPS_INVOICE_PREFIX_FEE . '-' . commerce_marketplace_paypal_ipn_invoice($group_orders),
         'email' => $payment_method['settings']['business'],
       );
@@ -180,7 +204,7 @@ function commerce_marketplace_paypal_wps_adaptive_get_paykey($form, $form_state)
     'clientDetails' => array(
       'applicationId' => $payment_method['settings']['marketplace_adaptive']['application_id'],
     ),
-    'currencyCode' => $form['currency_code']['#value'],
+    'currencyCode' => $currency_code,
     'receiverList' => array(
       'receiver' => $receivers,
     ),
@@ -402,9 +426,9 @@ function commerce_marketplace_paypal_wps_adaptive_paypal_ipn_process_transaction
 
   if (
     strpos($ipn_transaction['invoice'], COMMERCE_MARKETPLACE_PAYPAL_WPS_INVOICE_PREFIX_FEE) === 0
-    && !empty($order->data['commerce_marketplace_paypal_wps']['marketplace_fee'])
+    && !empty($order->data['commerce_marketplace_paypal_wps']['marketplace_fee']['amount'])
   ) {
-    $transaction->amount = $order->data['commerce_marketplace_paypal_wps']['marketplace_fee'];
+    $transaction->amount = $order->data['commerce_marketplace_paypal_wps']['marketplace_fee']['amount'];
   }
 
   // Set the transaction's statuses based on the IPN's payment_status.
